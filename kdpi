@@ -1,0 +1,183 @@
+library(shiny)
+library(dplyr)
+library(transplantr)
+
+ui <- navbarPage(
+  "KDPI Calculator",
+  
+  tabPanel("Calculator",
+           fluidPage(
+             tags$h1("KDPI Calculator", style = "text-align:center; color:#2c3e50; font-weight:bold; margin-bottom:30px;"),
+             
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("age", "Age (years)", value = 40, min = 0, max = 100),
+                 numericInput("height", "Height (cm)", value = 170, min = 50, max = 250),
+                 numericInput("weight", "Weight (kg)", value = 80, min = 20, max = 200),
+                 selectInput("eth", "Ethnicity", choices = c("non-black", "black")),
+                 selectInput("htn", "History of Hypertension", choices = c("No" = 0, "Yes" = 1)),
+                 selectInput("dm", "History of Diabetes", choices = c("No" = 0, "Yes" = 1)),
+                 selectInput("cva", "Cause of Death: CVA", choices = c("No" = 0, "Yes" = 1)),
+                 numericInput("creat", "Serum Creatinine (mg/dL)", value = 1, min = 0, step = 0.1),
+                 selectInput("hcv", "Hepatitis C", choices = c("No" = 0, "Yes" = 1)),
+                 selectInput("dcd", "Donation after Circulatory Death (DCD)", choices = c("No" = 0, "Yes" = 1))
+               ),
+               
+               mainPanel(
+                 tags$h3("KDPI value", style = "color:#2980b9; font-weight:bold;"),
+                 htmlOutput("kdpi_result"),
+                 
+                 tags$h3("KDRI value", style = "color:#7f8c8d; font-weight:bold; margin-top:30px;"),
+                 htmlOutput("kdr_result"),
+                 
+                 br(),
+                 downloadButton("export_txt", "Export as TXT", class = "btn-primary"),
+                 br(), br(),
+                 actionButton("reset_btn", "Clear Fields", class = "btn btn-warning"),
+                 br(), br(),
+                 actionButton("share_btn", "Share via Email", class = "btn btn-success", 
+                              onclick = "window.location.href='mailto:?subject=KDPI Calculator&body=Check out this KDPI calculator: https://transplantmodels.shinyapps.io/kdpi/'"),
+                 br(), br(),
+                 actionButton("whatsapp_btn", "Share via WhatsApp", class = "btn btn-success",
+                              onclick = "window.open('https://wa.me/?text=Check%20out%20this%20KDPI%20calculator:%20https://transplantmodels.shinyapps.io/kdpi/', '_blank')")
+               )
+             )
+           )
+  ),
+  
+  tabPanel("What is KDPI and KDRI?",
+           fluidPage(
+             br(),
+             h3("What is KDPI and KDRI?", style = "font-weight:bold;"),
+             p("The Kidney Donor Profile Index (KDPI) is a percentile score (0–100%) that estimates the relative quality of a deceased donor kidney compared to other recovered kidneys."),
+             p("The Kidney Donor Risk Index (KDRI) is a continuous numerical score that quantifies the relative risk of graft failure after transplant, based on 10 donor characteristics."),
+             p("KDPI is directly derived from the KDRI, and represents the donor’s risk as a percentile based on national data from OPTN/UNOS."),
+             p("KDRI values are normalized by a scaling factor based on the median KDRI from the previous year. For example, the 2018 scaling factor was approximately 1.250609."),
+             p("The reference donor used by Rao et al. (2009) is defined as a 40-year-old, 170 cm tall, 80 kg, non-black donor, with no hypertension or diabetes, cause of death not being CVA, serum creatinine of 1.0 mg/dL, HCV negative, and not a DCD."),
+             p(em("Reference: Rao PS, Schaubel DE, Guidinger MK, et al. A Comprehensive Risk Quantification Score for Deceased Donor Kidneys: The Kidney Donor Risk Index. Transplantation. 2009; 88(2):231–236."))
+           )
+  ),
+  
+  tabPanel("Terms of Use",
+           fluidPage(
+             br(),
+             h3("Terms of Use", style = "font-weight:bold;"),
+             p("This application is intended for educational and informational use only. It does not replace professional clinical judgment."),
+             p("KDPI and KDRI are calculated based solely on donor characteristics and must be interpreted alongside clinical, surgical, and logistical considerations."),
+             p("The calculation is based on the 'transplantr' R package (v0.2.0), which implements the OPTN/UNOS equations. The 'dplyr' package is also required."),
+             p("The developers do not take responsibility for clinical decisions made based on the results."),
+             p("This app does not modify any of the underlying formulas from 'transplantr'. It simply provides a user-friendly interface for accessing them.")
+           )
+  ),
+  
+  tabPanel("About the Developer",
+           fluidPage(
+             br(),
+             h3("Developer Information", style = "font-weight:bold;"),
+             p("This KDPI calculator was developed by Dr. Gustavo Modelli, Nephrologist and Clinical Researcher at UNESP Botucatu, Brazil."),
+             p("The application aims to support clinical decision-making and education in the field of kidney transplantation."),
+             tags$hr(),
+             tags$p("For questions, suggestions, or collaborations, feel free to contact:"),
+             tags$p(strong("Name: "), "Gustavo Modelli"),
+             tags$p(strong("Email: "), 
+                    tags$a(href = "mailto:gustavo.modelli@unesp.br", "gustavo.modelli@unesp.br", style = "color:#2980b9; font-weight:bold;")),
+             tags$br(),
+             actionButton("email_btn", "Send Email", onclick = "window.location.href='mailto:gustavo.modelli@unesp.br'")
+           )
+  )
+)
+
+server <- function(input, output, session) {
+  data_input <- reactive({
+    data.frame(
+      age = input$age,
+      height = input$height,
+      weight = input$weight,
+      eth = input$eth,
+      htn = as.numeric(input$htn),
+      dm = as.numeric(input$dm),
+      cva = as.numeric(input$cva),
+      creat = input$creat,
+      hcv = as.numeric(input$hcv),
+      dcd = as.numeric(input$dcd)
+    )
+  })
+  
+  output$kdr_result <- renderUI({
+    data <- data_input()
+    value <- uskdri(
+      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+      hcv = data$hcv, dcd = data$dcd, units = "US"
+    )
+    HTML(paste0("<div style='font-size:24px; color:#7f8c8d;'><strong>", round(value, 3), "</strong></div>"))
+  })
+  
+  output$kdpi_result <- renderUI({
+    data <- data_input()
+    value <- kdpi(
+      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+      hcv = data$hcv, dcd = data$dcd, units = "US"
+    )
+    HTML(paste0("<div style='font-size:24px; color:#2980b9;'><strong>", round(value, 2), "%</strong></div>"))
+  })
+  
+  output$export_txt <- downloadHandler(
+    filename = function() {
+      paste0("kdpi_results_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt")
+    },
+    content = function(file) {
+      data <- data_input()
+      kdpi_val <- kdpi(
+        age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+        htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+        hcv = data$hcv, dcd = data$dcd, units = "US"
+      )
+      kdri_val <- uskdri(
+        age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+        htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+        hcv = data$hcv, dcd = data$dcd, units = "US"
+      )
+      timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+      result <- paste(
+        "KDPI/KDRI Calculation Summary",
+        "-----------------------------",
+        paste("Date and Time:", timestamp),
+        "",
+        "Donor Information:",
+        paste("Age:", data$age, "years"),
+        paste("Height:", data$height, "cm"),
+        paste("Weight:", data$weight, "kg"),
+        paste("Ethnicity:", data$eth),
+        paste("History of Hypertension:", ifelse(data$htn == 1, "Yes", "No")),
+        paste("History of Diabetes:", ifelse(data$dm == 1, "Yes", "No")),
+        paste("Cause of Death: CVA:", ifelse(data$cva == 1, "Yes", "No")),
+        paste("Serum Creatinine:", data$creat, "mg/dL"),
+        paste("Hepatitis C:", ifelse(data$hcv == 1, "Yes", "No")),
+        paste("Donation after Circulatory Death:", ifelse(data$dcd == 1, "Yes", "No")),
+        "",
+        "Results:",
+        paste("KDPI:", round(kdpi_val, 2), "%"),
+        paste("KDRI:", round(kdri_val, 3)),
+        sep = "\n"
+      )
+      writeLines(result, con = file)
+    }
+  )
+  
+  observeEvent(input$reset_btn, {
+    updateNumericInput(session, "age", value = 40)
+    updateNumericInput(session, "height", value = 170)
+    updateNumericInput(session, "weight", value = 80)
+    updateSelectInput(session, "eth", selected = "non-black")
+    updateSelectInput(session, "htn", selected = "0")
+    updateSelectInput(session, "dm", selected = "0")
+    updateSelectInput(session, "cva", selected = "0")
+    updateNumericInput(session, "creat", value = 1)
+    updateSelectInput(session, "hcv", selected = "0")
+    updateSelectInput(session, "dcd", selected = "0")
+  })
+}
+
+shinyApp(ui = ui, server = server)
