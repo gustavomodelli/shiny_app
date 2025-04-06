@@ -1,0 +1,258 @@
+library(shiny)
+library(nephro)
+library(ggplot2)
+
+ui <- fluidPage(
+  titlePanel("Transplat Tools - Auxilio ao Suporte Diagnostico"),
+  
+  tabsetPanel(
+    tabPanel("Avaliacao CMV Refratario",
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("carga_inicial", "Carga viral inicial (copias/mL):", value = NA, min = 0),
+                 numericInput("carga_atual", "Carga viral atual (copias/mL):", value = NA, min = 0),
+                 numericInput("dias", "Dias entre as duas coletas:", value = NA, min = 0),
+                 selectInput("uso_ganciclovir", "Uso de ganciclovir ou valganciclovir:",
+                             choices = c("Nao", "Dose reduzida", "Dose completa"),
+                             selected = "Nao"),
+                 checkboxInput("piora_clinica", "Houve piora clinica ou progressao para doenca de orgao-alvo?", FALSE),
+                 checkboxInput("sem_melhora", "Os sintomas nao melhoraram apos 14 dias de tratamento antiviral?", FALSE),
+                 checkboxInput("mostrar_detalhes", "Mostrar detalhes da avaliacao", TRUE),
+                 actionButton("avaliar", "Avaliar Refratariedade")
+               ),
+               mainPanel(
+                 h3("Resultado da Avaliacao:"),
+                 uiOutput("resultado"),
+                 conditionalPanel(
+                   condition = "input.mostrar_detalhes == true",
+                   h4("Detalhes calculados (log10):"),
+                   verbatimTextOutput("valores"),
+                   plotOutput("grafico_carga")
+                 )
+               )
+             )
+    ),
+    
+    tabPanel("CKD-EPI 2021",
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("creatinina", "Creatinina (mg/dL):", value = NA, min = 0, step = 0.25),
+                 selectInput("sexo", "Sexo:", choices = list("Feminino" = 0, "Masculino" = 1)),
+                 numericInput("idade", "Idade (anos):", value = NA, min = 0),
+                 actionButton("calcular_tfg", "Calcular TFG")
+               ),
+               mainPanel(
+                 h3("Estimativa da TFG - CKD-EPI 2021"),
+                 uiOutput("resultado_tfg")
+               )
+             )
+    ),
+    
+    tabPanel("Doses de medicamentos CMV",
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("peso", "Peso do paciente (kg):", value = NA, min = 1),
+                 numericInput("tfg_manual", "TFG (mL/min/1.73m2):", value = NA, min = 1),
+                 selectInput("medicamento", "Escolha o antiviral:",
+                             choices = c("Valganciclovir", "Ganciclovir EV")),
+                 actionButton("calcular_dose", "Calcular Dose")
+               ),
+               mainPanel(
+                 h3("Recomendacao de dose para CMV"),
+                 uiOutput("dose_output")
+               )
+             )
+    ),
+    
+    tabPanel("Definicoes CMV refratario",
+             h3("Definicoes Atualizadas - CMV Refratario (2024)"),
+             HTML("<b>Refractory CMV infection:</b> Defined as CMV viremia (DNAemia or antigenemia) that increases (>1 log10 in CMV DNA levels from peak value) OR persists (<=1 log10 variation) after at least 2 weeks of appropriately dosed antiviral therapy.<br><br>
+                   <b>Refractory CMV end-organ disease:</b> Defined as worsening of signs/symptoms or progression to end-organ disease, OR lack of improvement in symptoms after at least 2 weeks of antiviral treatment.<br><br>
+                   <b>Fonte:</b> Ljungman P, et al; CMV Definitions Working Group. Clin Infect Dis. 2024.")
+    ),
+    
+    tabPanel("Sobre",
+             h3("Sobre o Desenvolvedor"),
+             p("Este aplicativo foi desenvolvido por Gustavo Modelli."),
+             p("Email para contato: ", a(href = "mailto:gustavo.modelli@unesp.br", "gustavo.modelli@unesp.br")),
+             br(),
+             actionButton("enviar_email", "Enviar Email")
+    )
+  )
+)
+
+server <- function(input, output) {
+  
+  observeEvent(input$avaliar, {
+    req(!is.na(input$carga_inicial), !is.na(input$carga_atual), !is.na(input$dias))
+    
+    if (input$carga_inicial <= 0 || input$carga_atual <= 0) {
+      output$resultado <- renderUI({
+        tags$span(style = "color:red; font-weight:bold;",
+                  "As cargas virais devem ser maiores que zero para avaliacao logaritmica.")
+      })
+      output$valores <- renderText({ "" })
+      return()
+    }
+    
+    if (input$dias < 14) {
+      output$valores <- renderText({ "" })
+      output$resultado <- renderUI({
+        tags$span(style = "color:orange; font-weight:bold;",
+                  "A avaliacao deve ser realizada apos pelo menos 14 dias de tratamento antiviral.")
+      })
+      return()
+    }
+    
+    carga_inicial_adj <- input$carga_inicial + 1
+    carga_atual_adj <- input$carga_atual + 1
+    log_inicial <- log10(carga_inicial_adj)
+    log_atual <- log10(carga_atual_adj)
+    diferenca <- log_atual - log_inicial
+    
+    output$valores <- renderText({
+      paste0(
+        "Log10 carga inicial (ajustada): ", round(log_inicial, 3), "\n",
+        "Log10 carga atual (ajustada): ", round(log_atual, 3), "\n",
+        "Diferenca: ", round(diferenca, 3)
+      )
+    })
+    
+    output$grafico_carga <- renderPlot({
+      dados <- data.frame(
+        Momento = c("Inicial", "Atual"),
+        Carga = c(log_inicial, log_atual)
+      )
+      ggplot(dados, aes(x = Momento, y = Carga)) +
+        geom_col(fill = "steelblue") +
+        labs(title = "Evolucao da carga viral (log10)", y = "Log10 Carga", x = "Momento") +
+        theme_minimal()
+    })
+    
+    if (input$uso_ganciclovir != "Dose completa") {
+      output$resultado <- renderUI({
+        HTML(paste0(
+          "<span style='color:orange; font-weight:bold;'>",
+          "Nao e possivel caracterizar refratariedade ao CMV sem uso de dose completa de ganciclovir ou valganciclovir.",
+          "</span><br/><br/><small>Fonte: Ljungman P, et al. Clin Infect Dis. 2024</small>"
+        ))
+      })
+      return()
+    }
+    
+    mensagens <- c()
+    
+    if (diferenca > 1) {
+      mensagens <- c(mensagens, "<span style='color:red; font-weight:bold;'>CMV refratario: aumento significativo (>1 log10) da viremia.</span>")
+    } else if (abs(diferenca) <= 1) {
+      mensagens <- c(mensagens, "<span style='color:red; font-weight:bold;'>CMV refratario: viremia persistente (variacao <=1 log10).</span>")
+    }
+    
+    if (input$piora_clinica) {
+      mensagens <- c(mensagens, "<span style='color:red; font-weight:bold;'>Piora clinica ou doenca de orgao-alvo em evolucao.</span>")
+    }
+    
+    if (input$sem_melhora) {
+      mensagens <- c(mensagens, "<span style='color:red; font-weight:bold;'>Ausencia de melhora clinica apos 14 dias.</span>")
+    }
+    
+    if (length(mensagens) == 0) {
+      mensagens <- c("<span style='color:blue; font-weight:bold;'>Nao ha indicacao de CMV refratario baseado nos criterios atuais.</span>")
+    }
+    
+    output$resultado <- renderUI({
+      HTML(paste(
+        c(mensagens, "<br><br><small>Fonte: Ljungman P, et al. Clin Infect Dis. 2024</small>"),
+        collapse = "<br/>"
+      ))
+    })
+  })
+  
+  observeEvent(input$calcular_tfg, {
+    req(!is.na(input$creatinina), !is.na(input$idade))
+    
+    data <- data.frame(
+      creatinine = input$creatinina,
+      sex = as.numeric(input$sexo),
+      age = input$idade
+    )
+    
+    tfg <- CKDEpi2021.creat(
+      creatinine = data$creatinine,
+      sex = data$sex,
+      age = data$age
+    )
+    
+    output$resultado_tfg <- renderUI({
+      tagList(
+        tags$span(style = "color:blue; font-weight:bold;",
+                  paste0("TFG estimada (CKD-EPI 2021): ", round(tfg, 2), " mL/min/1.73m2")),
+        tags$br(),
+        if (input$idade <= 17) {
+          tags$div(style = "color:orange; font-style:italic;",
+                   "Aviso: A formula CKD-EPI nao e a preferida para pacientes pediatricos. Recomenda-se o uso da formula de Schwartz.")
+        },
+        tags$small("GFR is estimated with the CKD-EPI Study equation based on serum creatinine without the ethnicity coefficient. Inker LA et al. N Engl J Med 2021; 385: 1737-1749.")
+      )
+    })
+  })
+  
+  observeEvent(input$calcular_dose, {
+    req(!is.na(input$peso), !is.na(input$tfg_manual), input$tfg_manual > 0)
+    
+    peso <- input$peso
+    tfg <- input$tfg_manual
+    med <- input$medicamento
+    
+    recomendacao <- ""
+    
+    if (tolower(med) == "valganciclovir") {
+      if (tfg >= 60) {
+        dose <- "900 mg VO 2x/dia"
+      } else if (tfg >= 40) {
+        dose <- "450 mg VO 2x/dia"
+      } else if (tfg >= 25) {
+        dose <- "450 mg VO 1x/dia"
+      } else if (tfg >= 10) {
+        dose <- "450 mg VO em dias alternados"
+      } else {
+        dose <- "Nao recomendado (TFG <10 mL/min/1.73m2)"
+      }
+      recomendacao <- paste0("Valganciclovir: ", dose)
+      
+    } else if (tolower(med) == "ganciclovir ev") {
+      if (tfg >= 70) {
+        dose <- round(5 * peso)
+      } else if (tfg >= 50) {
+        dose <- round(2.5 * peso)
+      } else if (tfg >= 25) {
+        dose <- round(2.5 * peso)
+      } else if (tfg >= 10) {
+        dose <- round(1.25 * peso)
+      } else {
+        dose <- NA
+      }
+      
+      if (is.na(dose)) {
+        recomendacao <- "Ganciclovir EV: Nao recomendado (TFG <10 mL/min/1.73m2)"
+      } else {
+        recomendacao <- paste0("Ganciclovir EV: ", dose, " mg EV a cada 12 horas (ajustar conforme TFG)")
+      }
+    }
+    
+    output$dose_output <- renderUI({
+      tagList(
+        tags$span(style = "color:green; font-weight:bold;", recomendacao),
+        tags$br(),
+        tags$small("Fonte: Bulario eletronico ANVISA e recomendacoes clinicas atualizadas.")
+      )
+    })
+  })
+  
+  observeEvent(input$enviar_email, {
+    browseURL("mailto:gustavo.modelli@unesp.br")
+  })
+}
+
+shinyApp(ui = ui, server = server)
+
