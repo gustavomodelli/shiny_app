@@ -20,11 +20,12 @@ ui <- navbarPage(
                  selectInput("cva", "Cause of Death: CVA", choices = c("No" = 0, "Yes" = 1)),
                  numericInput("creat", "Serum Creatinine (mg/dL)", value = 1, min = 0, step = 0.1),
                  selectInput("hcv", "Hepatitis C", choices = c("No" = 0, "Yes" = 1)),
-                 selectInput("dcd", "Donation after Circulatory Death (DCD)", choices = c("No" = 0, "Yes" = 1))
+                 selectInput("dcd", "Donation after Circulatory Death (DCD)", choices = c("No" = 0, "Yes" = 1)),
+                 numericInput("scaling", "Scaling Factor", value = 1.3816, min = 0.5, max = 2, step = 0.01)
                ),
                
                mainPanel(
-                 tags$h3("KDPI value", style = "color:#2980b9; font-weight:bold;"),
+                 htmlOutput("kdpi_title"),
                  htmlOutput("kdpi_result"),
                  
                  tags$h3("KDRI value", style = "color:#7f8c8d; font-weight:bold; margin-top:30px;"),
@@ -49,12 +50,12 @@ ui <- navbarPage(
            fluidPage(
              br(),
              h3("What is KDPI and KDRI?", style = "font-weight:bold;"),
-             p("The Kidney Donor Profile Index (KDPI) is a percentile score (0–100%) that estimates the relative quality of a deceased donor kidney compared to other recovered kidneys."),
+             p("The Kidney Donor Profile Index (KDPI) is a percentile score (0-100%) that estimates the relative quality of a deceased donor kidney compared to other recovered kidneys."),
              p("The Kidney Donor Risk Index (KDRI) is a continuous numerical score that quantifies the relative risk of graft failure after transplant, based on 10 donor characteristics."),
-             p("KDPI is directly derived from the KDRI, and represents the donor’s risk as a percentile based on national data from OPTN/UNOS."),
-             p("KDRI values are normalized by a scaling factor based on the median KDRI from the previous year. For example, the 2018 scaling factor was approximately 1.250609."),
+             p("KDPI is directly derived from the KDRI, and represents the donor's risk as a percentile based on national data from OPTN/UNOS."),
+             p("KDRI values are normalized by a scaling factor based on the median KDRI from the previous year. We used de scale Factor for 2024: 1.38 based on the OPTN databse"),
              p("The reference donor used by Rao et al. (2009) is defined as a 40-year-old, 170 cm tall, 80 kg, non-black donor, with no hypertension or diabetes, cause of death not being CVA, serum creatinine of 1.0 mg/dL, HCV negative, and not a DCD."),
-             p(em("Reference: Rao PS, Schaubel DE, Guidinger MK, et al. A Comprehensive Risk Quantification Score for Deceased Donor Kidneys: The Kidney Donor Risk Index. Transplantation. 2009; 88(2):231–236."))
+             p(em("Reference: Rao PS, Schaubel DE, Guidinger MK, et al. A Comprehensive Risk Quantification Score for Deceased Donor Kidneys: The Kidney Donor Risk Index. Transplantation. 2009; 88(2):231-236."))
            )
   ),
   
@@ -99,18 +100,28 @@ server <- function(input, output, session) {
       cva = as.numeric(input$cva),
       creat = input$creat,
       hcv = as.numeric(input$hcv),
-      dcd = as.numeric(input$dcd)
+      dcd = as.numeric(input$dcd),
+      scaling = input$scaling
     )
   })
   
-  output$kdr_result <- renderUI({
+  output$kdpi_title <- renderUI({
     data <- data_input()
-    value <- uskdri(
+    value <- kdpi(
       age = data$age, height = data$height, weight = data$weight, eth = data$eth,
       htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-      hcv = data$hcv, dcd = data$dcd, units = "US"
+      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
     )
-    HTML(paste0("<div style='font-size:24px; color:#7f8c8d;'><strong>", round(value, 3), "</strong></div>"))
+    
+    color <- if (value <= 35) {
+      "#27ae60"  # verde
+    } else if (value <= 84) {
+      "#f39c12"  # amarelo
+    } else {
+      "#c0392b"  # vermelho
+    }
+    
+    HTML(paste0("<h3 style='color:", color, "; font-weight:bold;'>KDPI value</h3>"))
   })
   
   output$kdpi_result <- renderUI({
@@ -118,9 +129,31 @@ server <- function(input, output, session) {
     value <- kdpi(
       age = data$age, height = data$height, weight = data$weight, eth = data$eth,
       htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-      hcv = data$hcv, dcd = data$dcd, units = "US"
+      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
     )
-    HTML(paste0("<div style='font-size:24px; color:#2980b9;'><strong>", round(value, 2), "%</strong></div>"))
+    
+    color <- if (value <= 35) {
+      "#27ae60"
+    } else if (value <= 84) {
+      "#f39c12"
+    } else {
+      "#c0392b"
+    }
+    
+    HTML(paste0(
+      "<div style='font-size:24px; font-weight:bold; color:", color, ";'>",
+      round(value, 2), "%</div>"
+    ))
+  })
+  
+  output$kdr_result <- renderUI({
+    data <- data_input()
+    value <- uskdri(
+      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
+    )
+    HTML(paste0("<div style='font-size:24px; color:#7f8c8d;'><strong>", round(value, 3), "</strong></div>"))
   })
   
   output$export_txt <- downloadHandler(
@@ -132,12 +165,12 @@ server <- function(input, output, session) {
       kdpi_val <- kdpi(
         age = data$age, height = data$height, weight = data$weight, eth = data$eth,
         htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-        hcv = data$hcv, dcd = data$dcd, units = "US"
+        hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
       )
       kdri_val <- uskdri(
         age = data$age, height = data$height, weight = data$weight, eth = data$eth,
         htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-        hcv = data$hcv, dcd = data$dcd, units = "US"
+        hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
       )
       timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
       result <- paste(
@@ -177,7 +210,9 @@ server <- function(input, output, session) {
     updateNumericInput(session, "creat", value = 1)
     updateSelectInput(session, "hcv", selected = "0")
     updateSelectInput(session, "dcd", selected = "0")
+    updateNumericInput(session, "scaling", value = 1.3816)
   })
 }
 
 shinyApp(ui = ui, server = server)
+
