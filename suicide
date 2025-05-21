@@ -1,0 +1,87 @@
+library(shiny)
+library(tibble)
+library(xgboost)
+
+# Carrega o modelo treinado
+model_new <- readRDS("modelXGB.RDS")
+
+# Interface do usuário
+ui <- fluidPage(
+  titlePanel("Predição de Tentativa de Suicídio em Pacientes com Fibromialgia"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      numericInput("years_with_fibromyalgia", "Anos com fibromialgia:", value = 1, min = 0),
+      selectInput("used_tobacco_derivatives", "Uso de derivados de tabaco:", choices = c("Nunca" = 0, "Eventualmente" = 1, "Frequentemente" = 2)),
+      selectInput("used_illicit_drugs", "Uso de drogas ilícitas:", choices = c("Nunca" = 0, "Eventualmente" = 1, "Frequentemente" = 2)),
+      numericInput("number_of_drinks", "Número de doses de bebida alcoólica por dia:", value = 0, min = 0),
+      selectInput("felt_grateful_for_life", "Sentiu-se grato(a) pela vida:", choices = c("Não" = 0, "Sim" = 1)),
+      selectInput("contemplation_activities", "Realizou atividades de contemplação:", choices = c("Não" = 0, "Sim" = 1)),
+      numericInput("brushed_or_combed_hair", "Escovou ou penteou o cabelo (vezes):", value = 0, min = 0),
+      numericInput("walked_20_minutes", "Caminhou por 20 minutos (vezes):", value = 0, min = 0),
+      numericInput("changed_bed_sheets", "Trocou roupa de cama (vezes):", value = 0, min = 0),
+      numericInput("sat_continuously", "Ficou sentado(a) continuamente (horas):", value = 0, min = 0),
+      numericInput("grocery_shopping", "Fez compras de supermercado (vezes):", value = 0, min = 0),
+      sliderInput("pain_level", "Nível de dor (0-10):", min = 0, max = 10, value = 5),
+      sliderInput("energy_level", "Nível de energia (0 = alta, 10 = sem energia):", min = 0, max = 10, value = 5),
+      sliderInput("sleep_quality", "Qualidade do sono (0-10):", min = 0, max = 10, value = 5),
+      sliderInput("noise_sensitivity", "Sensibilidade a ruído (0-10):", min = 0, max = 10, value = 5),
+      numericInput("fear_cold_gut_sensation", "Sensação de medo/frio na barriga:", value = 0, min = 0, max = 4),
+      numericInput("feeling_impatient", "Sentimento de impaciência:", value = 0, min = 0, max = 4),
+      selectInput("plan_suicide", "Planejou suicídio:", choices = c("Não" = 0, "Sim" = 1)),
+      actionButton("predict_btn", "Realizar Predição")
+    ),
+    
+    mainPanel(
+      h4("Resultado da Predição"),
+      uiOutput("prediction_text")  # Saída em HTML
+    )
+  )
+)
+
+# Lógica do servidor
+server <- function(input, output) {
+  
+  observeEvent(input$predict_btn, {
+    # Monta os dados do usuário com nomes esperados pelo modelo
+    user_input <- tibble::tibble(
+      years_with_fibromyalgia = input$years_with_fibromyalgia,
+      used_tobacco_derivatives = as.numeric(input$used_tobacco_derivatives),
+      used_illicit_drugs = as.numeric(input$used_illicit_drugs),
+      number_of_drinks = input$number_of_drinks,
+      felt_grateful_for_life = as.numeric(input$felt_grateful_for_life),
+      contemplation_activities = as.numeric(input$contemplation_activities),
+      brushed_or_combed_hair = input$brushed_or_combed_hair,
+      walked_20_minutes = input$walked_20_minutes,
+      changed_bed_sheets = input$changed_bed_sheets,
+      sat_continuously = input$sat_continuously,
+      grocery_shopping = input$grocery_shopping,
+      pain_level = input$pain_level,
+      energy_level = input$energy_level,
+      sleep_quality = input$sleep_quality,
+      noise_sensitivity = input$noise_sensitivity,
+      fear_cold_gut_sensation = input$fear_cold_gut_sensation,
+      feeling_impatient = input$feeling_impatient,
+      plan_suicide = as.numeric(input$plan_suicide)
+    )
+    
+    # Converte para matriz e prediz
+    input_matrix <- as.matrix(user_input)
+    prob <- predict(model_new, input_matrix)
+    pred_class <- ifelse(prob > 0.5, "SIM", "NÃO")
+    
+    # Cor condicional
+    cor <- ifelse(pred_class == "SIM", "red", "blue")
+    
+    # Saída formatada
+    output$prediction_text <- renderUI({
+      HTML(paste0(
+        "Probabilidade prevista de tentativa de suicídio: <strong>", round(prob, 3), "</strong><br>",
+        "<span style='color:", cor, "; font-size: 22px;'><strong>Classificação final (limiar 0.5): ", pred_class, "</strong></span>"
+      ))
+    })
+  })
+}
+
+# Executa o aplicativo
+shinyApp(ui = ui, server = server)
