@@ -1,0 +1,101 @@
+library(shiny)
+library(xgboost)
+library(dplyr)
+
+# Carregar o modelo apenas uma vez
+model <- readRDS('model_egfr.RDS')
+
+ui <- fluidPage(
+  titlePanel("Estimativa de eGFR: Machine Learning, CKD-EPI 2021 e Bedside Schwartz"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      numericInput("age", "Idade (anos):", value = 44, min = 0, max = 120),
+      numericInput("cretmg", "Creatinina (mg/dL):", value = 1.1, min = 0.1, max = 20),
+      selectInput("sexe_male", "Sexo:", choices = c("Masculino" = 1, "Feminino" = 0)),
+      
+      tags$hr(),
+      tags$b("⚠ Altura (apenas para crianças - cálculo de Bedside Schwartz)"),
+      numericInput("height", "Altura (cm):", value = 160, min = 30, max = 220),
+      
+      tags$hr(),
+      actionButton("predict_btn", "Calcular eGFR")
+    ),
+    
+    mainPanel(
+      h3("Resultados:"),
+      htmlOutput("prediction_ml"),
+      htmlOutput("prediction_ckdepi"),
+      htmlOutput("prediction_schwartz")
+    )
+  )
+)
+
+server <- function(input, output) {
+  
+  prediction_result <- eventReactive(input$predict_btn, {
+    
+    # Machine Learning Prediction (aplica em qualquer idade)
+    new_data <- data.frame(
+      age = input$age,
+      cretmg = input$cretmg,
+      sexe_male = as.numeric(input$sexe_male)
+    )
+    
+    new_data_matrix <- as.matrix(new_data)
+    predicted_ml <- predict(model, new_data_matrix)
+    
+    # CKD-EPI 2021 (somente se idade >= 18)
+    sexe_text <- ifelse(as.numeric(input$sexe_male) == 1, "male", "female")
+    age <- input$age
+    cretmg <- input$cretmg
+    
+    predicted_ckdepi <- NA
+    if (age >= 18) {
+      predicted_ckdepi <- case_when(
+        sexe_text == "female" & cretmg <= 0.7 ~ 143 * ((cretmg/0.7)^-0.241) * (0.9938^age),
+        sexe_text == "female" & cretmg > 0.7 ~ 143 * ((cretmg/0.7)^-1.200) * (0.9938^age),
+        sexe_text == "male" & cretmg <= 0.9 ~ 142 * ((cretmg/0.9)^-0.302) * (0.9938^age),
+        sexe_text == "male" & cretmg > 0.9 ~ 142 * ((cretmg/0.9)^-1.200) * (0.9938^age)
+      )
+    }
+    
+    # Bedside Schwartz (apenas se idade < 18)
+    predicted_schwartz <- NA
+    if (age < 18) {
+      height_cm <- input$height
+      predicted_schwartz <- 0.413 * (height_cm / cretmg)
+    }
+    
+    list(ml = predicted_ml, ckdepi = predicted_ckdepi, schwartz = predicted_schwartz)
+  })
+  
+  output$prediction_ml <- renderUI({
+    req(prediction_result())
+    HTML(paste0("<span style='color:blue;'>eGFR (Machine Learning): ", 
+                round(prediction_result()$ml, 2), " ml/min/1.73m²</span>"))
+  })
+  
+  output$prediction_ckdepi <- renderUI({
+    req(prediction_result())
+    if (!is.na(prediction_result()$ckdepi)) {
+      HTML(paste0("<span style='color:blue;'>eGFR (CKD-EPI 2021): ", 
+                  round(prediction_result()$ckdepi, 2), " ml/min/1.73m²</span>"))
+    } else {
+      HTML("<span style='color:red;'>CKD-EPI 2021 não aplicável para idade < 18 anos.</span>")
+    }
+  })
+  
+  output$prediction_schwartz <- renderUI({
+    req(prediction_result())
+    if (!is.na(prediction_result()$schwartz)) {
+      HTML(paste0("<span style='color:blue;'>eGFR (Bedside Schwartz): ", 
+                  round(prediction_result()$schwartz, 2), " ml/min/1.73m²</span>"))
+    } else {
+      HTML("<span style='color:red;'>Bedside Schwartz não aplicável para idade ≥ 18 anos.</span>")
+    }
+  })
+  
+}
+
+shinyApp(ui = ui, server = server)
