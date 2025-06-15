@@ -2,14 +2,13 @@ library(shiny)
 library(xgboost)
 library(dplyr)
 
-# Load your trained ML model
+# Carrega o modelo de ML treinado
 model <- readRDS('model_egfr.RDS')
 
-# KFRE simplified formula (5-year only)
+# Função KFRE 5 anos
 kfremodel_new <- function(age, sex, egfr, acr) {
   safe_egfr <- pmax(egfr, 1)
   safe_acr  <- pmax(acr, 1)
-  
   ln_acr <- log(safe_acr)
   
   formula <- (0.2694 * sex) + 
@@ -18,67 +17,89 @@ kfremodel_new <- function(age, sex, egfr, acr) {
     (0.45608 * ln_acr)
   
   lp_shifted <- formula + 2.96774
-  
   risk <- 1 - 0.924^(exp(lp_shifted))
-  
   return(risk)
 }
 
 ui <- fluidPage(
-  titlePanel("Kidney Failure Risk Equation (KFRE) - 5 Year Risk Calculator"),
+  titlePanel("KFRE PRO v3.5 - Adulto e Pediatria"),
   
-  sidebarLayout(
-    sidebarPanel(
-      numericInput("age", "Idade (anos):", value = 50, min = 0, max = 120),
-      numericInput("cretmg", "Creatinina (mg/dL):", value = 1.2, min = 0.1, max = 20),
-      selectInput("sexe_male", "Sexo:", choices = c("Masculino" = 1, "Feminino" = 0)),
-      
-      tags$hr(),
-      tags$b("⚠ Altura (apenas para crianças - Bedside Schwartz)"),
-      numericInput("height", "Altura (cm):", value = 160, min = 30, max = 220),
-      
-      tags$hr(),
-      tags$b("⚠ ACR (Albumina/Creatinina mg/g):"),
-      numericInput("acr", "ACR (mg/g):", value = 50, min = 0.1, max = 5000),
-      
-      tags$hr(),
-      actionButton("predict_btn", "Calcular")
+  tabsetPanel(
+    tabPanel("Calculadora",
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("age", "Idade (anos):", value = 50, min = 0, max = 120),
+                 numericInput("cretmg", "Creatinina (mg/dL):", value = 1.2, min = 0.1, max = 20),
+                 selectInput("sexe_male", "Sexo:", choices = c("Masculino" = 1, "Feminino" = 0)),
+                 
+                 uiOutput("method_selector"),
+                 
+                 tags$hr(),
+                 tags$b("⚠ Altura (apenas para crianças - Bedside Schwartz)"),
+                 numericInput("height", "Altura (cm):", value = 160, min = 30, max = 220),
+                 
+                 tags$hr(),
+                 tags$b("⚠ ACR (Albumina/Creatinina mg/g):"),
+                 numericInput("acr", "ACR (mg/g):", value = 50, min = 0.1, max = 5000),
+                 
+                 tags$hr(),
+                 actionButton("predict_btn", "Calcular")
+               ),
+               
+               mainPanel(
+                 h3("Resultados:"),
+                 htmlOutput("prediction_results"),
+                 tags$hr(),
+                 htmlOutput("kfre_kdigo")
+               )
+             )
     ),
     
-    mainPanel(
-      h3("Resultados:"),
-      htmlOutput("prediction_ml"),
-      htmlOutput("prediction_ckdepi"),
-      htmlOutput("prediction_schwartz"),
-      tags$hr(),
-      h3("Risco de Progressão para Kidney Failure (KFRE 5 anos):"),
-      htmlOutput("kfre_5yr"),
-      tags$hr(),
-      tags$p("Classificação de risco baseada na KFRE 5 anos:"),
-      tags$p("0–5%: Baixo risco (verde); 5–15%: Risco intermediário (amarelo); >15%: Alto risco (vermelho).")
+    tabPanel("Referências e Contato",
+             tags$h4("Referências utilizadas:"),
+             tags$ul(
+               tags$li("Tangri N, Stevens LA, Griffith J, et al. JAMA. 2011;305(15):1553-9."),
+               tags$li("Tangri N, Grams ME, Levey AS, et al. JAMA. 2016;315(2):164-74."),
+               tags$li("KDIGO 2012 Clinical Practice Guideline. Kidney Int Suppl. 2013;3(1):1–150."),
+               tags$li("Levey AS, Stevens LA, Schmid CH, et al. Ann Intern Med. 2009;150(9):604–612."),
+               tags$li("Andrade LGM, et al. FAPESP Project.")
+             ),
+             tags$hr(),
+             tags$h5("Desenvolvedor da aplicação:"),
+             tags$p("Luis Gustavo Modelli de Andrade"),
+             tags$p("E-mail: gustavo.modelli@unesp.br"),
+             tags$hr(),
+             tags$p("Esta ferramenta não substitui o julgamento médico.")
     )
   )
 )
 
-server <- function(input, output) {
+server <- function(input, output, session) {
+  
+  output$method_selector <- renderUI({
+    if (input$age < 18) {
+      radioButtons("egfr_method", "Escolher método de eGFR:",
+                   choices = c("Machine Learning" = "ml", "Bedside Schwartz" = "schwartz"),
+                   selected = "ml")
+    } else {
+      radioButtons("egfr_method", "Escolher método de eGFR:",
+                   choices = c("Machine Learning" = "ml", "CKD-EPI 2021" = "ckdepi"),
+                   selected = "ml")
+    }
+  })
   
   prediction_result <- eventReactive(input$predict_btn, {
-    
-    # Machine Learning Prediction
-    new_data <- data.frame(
-      age = input$age,
-      cretmg = input$cretmg,
-      sexe_male = as.numeric(input$sexe_male)
-    )
-    
-    new_data_matrix <- as.matrix(new_data)
-    predicted_ml <- predict(model, new_data_matrix)
-    predicted_ml <- max(predicted_ml, 0.1)
-    
-    # CKD-EPI 2021 (somente se idade >= 18)
-    sexe_text <- ifelse(as.numeric(input$sexe_male) == 1, "male", "female")
     age <- input$age
     cretmg <- input$cretmg
+    sexe_num <- as.numeric(input$sexe_male)
+    height_cm <- input$height
+    acr <- input$acr
+    
+    new_data <- data.frame(age, cretmg, sexe_male = sexe_num)
+    predicted_ml <- predict(model, as.matrix(new_data))
+    predicted_ml <- max(predicted_ml, 0.1)
+    
+    sexe_text <- ifelse(sexe_num == 1, "male", "female")
     
     predicted_ckdepi <- NA
     if (age >= 18) {
@@ -90,65 +111,103 @@ server <- function(input, output) {
       )
     }
     
-    # Bedside Schwartz (apenas se idade < 18)
-    predicted_schwartz <- NA
-    if (age < 18) {
-      height_cm <- input$height
-      predicted_schwartz <- 0.413 * (height_cm / cretmg)
+    predicted_schwartz <- if (age < 18) 0.413 * (height_cm / cretmg) else NA
+    
+    eGFR_final <- switch(input$egfr_method,
+                         ml = predicted_ml,
+                         ckdepi = predicted_ckdepi,
+                         schwartz = predicted_schwartz,
+                         predicted_ml)
+    
+    risk_5yr <- if (age >= 18) kfremodel_new(age, sexe_num, eGFR_final, acr) else NA
+    
+    list(ml = predicted_ml, ckdepi = predicted_ckdepi, schwartz = predicted_schwartz,
+         eGFR_final = eGFR_final, kfre_5yr = risk_5yr, acr = acr, age = age)
+  })
+  
+  output$prediction_results <- renderUI({
+    req(prediction_result())
+    res <- prediction_result()
+    
+    out <- paste0("<b>eGFR (Machine Learning):</b> ", round(res$ml, 2), " ml/min/1.73m²<br>")
+    if (!is.na(res$ckdepi)) {
+      out <- paste0(out, "<b>eGFR (CKD-EPI 2021):</b> ", round(res$ckdepi, 2), " ml/min/1.73m²<br>")
     }
-    
-    # KFRE 5 years calculation
-    acr <- input$acr
-    sex_num <- as.numeric(input$sexe_male)
-    
-    risk_5yr <- kfremodel_new(age, sex_num, predicted_ml, acr)
-    
-    list(
-      ml = predicted_ml, 
-      ckdepi = predicted_ckdepi, 
-      schwartz = predicted_schwartz,
-      kfre_5yr = risk_5yr
-    )
+    if (!is.na(res$schwartz)) {
+      out <- paste0(out, "<b>eGFR (Bedside Schwartz):</b> ", round(res$schwartz, 2), " ml/min/1.73m²<br>")
+    }
+    HTML(out)
   })
   
-  output$prediction_ml <- renderUI({
+  output$kfre_kdigo <- renderUI({
     req(prediction_result())
-    HTML(paste0("<span style='color:blue;'>eGFR (Machine Learning): ", 
-                round(prediction_result()$ml, 2), " ml/min/1.73m²</span>"))
-  })
-  
-  output$prediction_ckdepi <- renderUI({
-    req(prediction_result())
-    if (!is.na(prediction_result()$ckdepi)) {
-      HTML(paste0("<span style='color:blue;'>eGFR (CKD-EPI 2021): ", 
-                  round(prediction_result()$ckdepi, 2), " ml/min/1.73m²</span>"))
+    res <- prediction_result()
+    
+    egfr <- res$eGFR_final
+    acr <- res$acr
+    age <- res$age
+    
+    gfr_stage <- ifelse(egfr >= 90, "G1",
+                        ifelse(egfr >= 60, "G2",
+                               ifelse(egfr >= 45, "G3a",
+                                      ifelse(egfr >= 30, "G3b",
+                                             ifelse(egfr >= 15, "G4", "G5")))))
+    
+    acr_stage <- ifelse(acr < 30, "A1",
+                        ifelse(acr <= 300, "A2", "A3"))
+    
+    kdigo_color <- switch(paste(gfr_stage, acr_stage),
+                          "G1 A1" = "green", "G1 A2" = "yellow", "G1 A3" = "orange",
+                          "G2 A1" = "green", "G2 A2" = "yellow", "G2 A3" = "orange",
+                          "G3a A1" = "yellow", "G3a A2" = "orange", "G3a A3" = "red",
+                          "G3b A1" = "orange", "G3b A2" = "red", "G3b A3" = "red",
+                          "G4 A1" = "red", "G4 A2" = "red", "G4 A3" = "red",
+                          "G5 A1" = "red", "G5 A2" = "red", "G5 A3" = "red", "red")
+    
+    kdigo_label <- ifelse(kdigo_color == "green", "Baixo risco",
+                          ifelse(kdigo_color == "yellow", "Risco moderado",
+                                 ifelse(kdigo_color == "orange", "Alto risco", "Risco muito alto")))
+    
+    out <- paste0("<b>Classificação KDIGO: </b><span style='color:", kdigo_color, "; font-weight:bold;'>",
+                  gfr_stage, acr_stage, "</span> - ", kdigo_label, "<br>",
+                  "(GFR: ", round(egfr,1), " ml/min/1.73m²; ACR: ", acr, " mg/g)<br><br>")
+    
+    tabela_gfr <- "<table border=1 cellpadding=4><tr><th>Estágio</th><th>eGFR</th><th>Descrição</th></tr>
+    <tr><td>G1</td><td>≥ 90</td><td>Função normal ou alta</td></tr>
+    <tr><td>G2</td><td>60–89</td><td>Leve redução</td></tr>
+    <tr><td>G3a</td><td>45–59</td><td>Redução leve a moderada</td></tr>
+    <tr><td>G3b</td><td>30–44</td><td>Redução moderada a severa</td></tr>
+    <tr><td>G4</td><td>15–29</td><td>Redução severa</td></tr>
+    <tr><td>G5</td><td><15</td><td>Insuficiência terminal</td></tr></table><br>"
+    
+    out <- paste0(out, tabela_gfr)
+    
+    if (age >= 18) {
+      risk_percent <- round(res$kfre_5yr * 100, 1)
+      risk_color <- ifelse(risk_percent <= 5, "green",
+                           ifelse(risk_percent <= 15, "orange", "red"))
+      
+      kfre_label <- ifelse(risk_percent <= 5, "Baixo risco de progressão",
+                           ifelse(risk_percent <= 15, "Risco intermediário de progressão", 
+                                  "Alto risco de progressão"))
+      
+      out <- paste0(out, "<b>Risco KFRE 5 anos: </b><span style='color:", risk_color, "; font-weight:bold;'>",
+                    risk_percent, "%</span> - ", kfre_label, "<br><br>")
+      
+      tabela_kfre <- "<table border=1 cellpadding=4><tr><th>Risco 5 anos (%)</th><th>Classificação</th></tr>
+      <tr><td>0–5%</td><td>Baixo risco</td></tr>
+      <tr><td>5–15%</td><td>Risco intermediário</td></tr>
+      <tr><td>> 15%</td><td>Alto risco</td></tr></table>"
+      
+      out <- paste0(out, tabela_kfre)
+      
     } else {
-      HTML("<span style='color:red;'>CKD-EPI 2021 não aplicável para idade < 18 anos.</span>")
+      out <- paste0(out, "<b>⚠ KFRE não validado para idade < 18 anos</b>")
     }
-  })
-  
-  output$prediction_schwartz <- renderUI({
-    req(prediction_result())
-    if (!is.na(prediction_result()$schwartz)) {
-      HTML(paste0("<span style='color:blue;'>eGFR (Bedside Schwartz): ", 
-                  round(prediction_result()$schwartz, 2), " ml/min/1.73m²</span>"))
-    } else {
-      HTML("<span style='color:red;'>Bedside Schwartz não aplicável para idade ≥ 18 anos.</span>")
-    }
-  })
-  
-  output$kfre_5yr <- renderUI({
-    req(prediction_result())
-    risk_percent <- round(prediction_result()$kfre_5yr * 100, 1)
     
-    color <- ifelse(risk_percent <= 5, "green",
-                    ifelse(risk_percent <= 15, "orange", "red"))
-    
-    HTML(paste0("<b>Risco 5 anos (KFRE): </b>",
-                "<span style='color:", color, "; font-weight:bold;'>",
-                risk_percent, "%</span>"))
+    HTML(out)
   })
-  
 }
 
 shinyApp(ui = ui, server = server)
+
