@@ -5,13 +5,32 @@ library(dplyr)
 # Load your trained ML model
 model <- readRDS('model_egfr.RDS')
 
+# KFRE simplified formula (5-year only)
+kfremodel_new <- function(age, sex, egfr, acr) {
+  safe_egfr <- pmax(egfr, 1)
+  safe_acr  <- pmax(acr, 1)
+  
+  ln_acr <- log(safe_acr)
+  
+  formula <- (0.2694 * sex) + 
+    (-0.21670 * (age/10)) + 
+    (-0.55418 * (safe_egfr/5)) + 
+    (0.45608 * ln_acr)
+  
+  lp_shifted <- formula + 2.96774
+  
+  risk <- 1 - 0.924^(exp(lp_shifted))
+  
+  return(risk)
+}
+
 ui <- fluidPage(
-  titlePanel("Estimativa de eGFR: Machine Learning, CKD-EPI 2021, Bedside Schwartz e KFRE"),
+  titlePanel("Kidney Failure Risk Equation (KFRE) - 5 Year Risk Calculator"),
   
   sidebarLayout(
     sidebarPanel(
-      numericInput("age", "Idade (anos):", value = 44, min = 0, max = 120),
-      numericInput("cretmg", "Creatinina (mg/dL):", value = 1.1, min = 0.1, max = 20),
+      numericInput("age", "Idade (anos):", value = 50, min = 0, max = 120),
+      numericInput("cretmg", "Creatinina (mg/dL):", value = 1.2, min = 0.1, max = 20),
       selectInput("sexe_male", "Sexo:", choices = c("Masculino" = 1, "Feminino" = 0)),
       
       tags$hr(),
@@ -19,10 +38,8 @@ ui <- fluidPage(
       numericInput("height", "Altura (cm):", value = 160, min = 30, max = 220),
       
       tags$hr(),
-      tags$b("⚠ ACR (Apenas para KFRE)"),
-      numericInput("acr", "Albumina/Creatinina (mg/g):", value = 30, min = 0.1, max = 5000),
-      
-      radioButtons("kfre_model", "Modelo KFRE:", choices = c("Canadense" = "canada", "Outro" = "other")),
+      tags$b("⚠ ACR (Albumina/Creatinina mg/g):"),
+      numericInput("acr", "ACR (mg/g):", value = 50, min = 0.1, max = 5000),
       
       tags$hr(),
       actionButton("predict_btn", "Calcular")
@@ -34,9 +51,11 @@ ui <- fluidPage(
       htmlOutput("prediction_ckdepi"),
       htmlOutput("prediction_schwartz"),
       tags$hr(),
-      h3("Risco de Progressão (KFRE):"),
-      htmlOutput("kfre_2yr"),
-      htmlOutput("kfre_5yr")
+      h3("Risco de Progressão para Kidney Failure (KFRE 5 anos):"),
+      htmlOutput("kfre_5yr"),
+      tags$hr(),
+      tags$p("Classificação de risco baseada na KFRE 5 anos:"),
+      tags$p("0–5%: Baixo risco (verde); 5–15%: Risco intermediário (amarelo); >15%: Alto risco (vermelho).")
     )
   )
 )
@@ -54,6 +73,7 @@ server <- function(input, output) {
     
     new_data_matrix <- as.matrix(new_data)
     predicted_ml <- predict(model, new_data_matrix)
+    predicted_ml <- max(predicted_ml, 0.1)
     
     # CKD-EPI 2021 (somente se idade >= 18)
     sexe_text <- ifelse(as.numeric(input$sexe_male) == 1, "male", "female")
@@ -77,43 +97,16 @@ server <- function(input, output) {
       predicted_schwartz <- 0.413 * (height_cm / cretmg)
     }
     
-    # KFRE calculation using ML-predicted eGFR
+    # KFRE 5 years calculation
     acr <- input$acr
     sex_num <- as.numeric(input$sexe_male)
-    ln_egfr <- log(predicted_ml)
-    ln_acr <- log(acr)
     
-    # Coefficients from Tangri 2011 (Canada model)
-    if (input$kfre_model == "canada") {
-      intercept_2yr <- -10.59
-      intercept_5yr <- -9.17
-      baseline_2yr <- 0.9904
-      baseline_5yr <- 0.9688
-    } else {
-      # placeholder for recalibrated values
-      intercept_2yr <- -9.2
-      intercept_5yr <- -7.9
-      baseline_2yr <- 0.993
-      baseline_5yr <- 0.975
-    }
-    
-    # β Coefficients (they stay the same for both)
-    beta_age <- 0.055
-    beta_sex <- 0.489
-    beta_ln_egfr <- -0.556
-    beta_ln_acr <- 0.451
-    
-    lp_2yr <- intercept_2yr + beta_age * age + beta_sex * sex_num + beta_ln_egfr * ln_egfr + beta_ln_acr * ln_acr
-    lp_5yr <- intercept_5yr + beta_age * age + beta_sex * sex_num + beta_ln_egfr * ln_egfr + beta_ln_acr * ln_acr
-    
-    risk_2yr <- 1 - (baseline_2yr ^ exp(lp_2yr))
-    risk_5yr <- 1 - (baseline_5yr ^ exp(lp_5yr))
+    risk_5yr <- kfremodel_new(age, sex_num, predicted_ml, acr)
     
     list(
       ml = predicted_ml, 
       ckdepi = predicted_ckdepi, 
       schwartz = predicted_schwartz,
-      kfre_2yr = risk_2yr, 
       kfre_5yr = risk_5yr
     )
   })
@@ -144,14 +137,16 @@ server <- function(input, output) {
     }
   })
   
-  output$kfre_2yr <- renderUI({
-    req(prediction_result())
-    HTML(paste0("<b>Risco 2 anos (KFRE): </b>", round(prediction_result()$kfre_2yr*100, 1), "%"))
-  })
-  
   output$kfre_5yr <- renderUI({
     req(prediction_result())
-    HTML(paste0("<b>Risco 5 anos (KFRE): </b>", round(prediction_result()$kfre_5yr*100, 1), "%"))
+    risk_percent <- round(prediction_result()$kfre_5yr * 100, 1)
+    
+    color <- ifelse(risk_percent <= 5, "green",
+                    ifelse(risk_percent <= 15, "orange", "red"))
+    
+    HTML(paste0("<b>Risco 5 anos (KFRE): </b>",
+                "<span style='color:", color, "; font-weight:bold;'>",
+                risk_percent, "%</span>"))
   })
   
 }
