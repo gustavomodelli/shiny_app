@@ -1,218 +1,182 @@
 library(shiny)
+library(xgboost)
 library(dplyr)
-library(transplantr)
 
-ui <- navbarPage(
-  "KDPI Calculator",
+# Load your trained ML model
+model <- readRDS('model_egfr.RDS')
+
+# KFRE simplified formula (5-year only)
+kfremodel_new <- function(age, sex, egfr, acr) {
+  safe_egfr <- pmax(egfr, 1)
+  safe_acr  <- pmax(acr, 1)
   
-  tabPanel("Calculator",
-           fluidPage(
-             tags$h1("KDPI Calculator", style = "text-align:center; color:#2c3e50; font-weight:bold; margin-bottom:30px;"),
-             
+  ln_acr <- log(safe_acr)
+  
+  formula <- (0.2694 * sex) + 
+    (-0.21670 * (age/10)) + 
+    (-0.55418 * (safe_egfr/5)) + 
+    (0.45608 * ln_acr)
+  
+  lp_shifted <- formula + 2.96774
+  
+  risk <- 1 - 0.924^(exp(lp_shifted))
+  
+  return(risk)
+}
+
+ui <- fluidPage(
+  titlePanel("Kidney Failure Risk Equation (KFRE PRO) - 5 Year Risk Calculator"),
+  
+  tabsetPanel(
+    
+    # Aba de cálculo
+    tabPanel("Calculadora",
              sidebarLayout(
                sidebarPanel(
-                 numericInput("age", "Age (years)", value = 40, min = 0, max = 100),
-                 numericInput("height", "Height (cm)", value = 170, min = 50, max = 250),
-                 numericInput("weight", "Weight (kg)", value = 80, min = 20, max = 200),
-                 selectInput("eth", "Ethnicity", choices = c("non-black", "black")),
-                 selectInput("htn", "History of Hypertension", choices = c("No" = 0, "Yes" = 1)),
-                 selectInput("dm", "History of Diabetes", choices = c("No" = 0, "Yes" = 1)),
-                 selectInput("cva", "Cause of Death: CVA", choices = c("No" = 0, "Yes" = 1)),
-                 numericInput("creat", "Serum Creatinine (mg/dL)", value = 1, min = 0, step = 0.1),
-                 selectInput("hcv", "Hepatitis C", choices = c("No" = 0, "Yes" = 1)),
-                 selectInput("dcd", "Donation after Circulatory Death (DCD)", choices = c("No" = 0, "Yes" = 1)),
-                 numericInput("scaling", "Scaling Factor", value = 1.3816, min = 0.5, max = 2, step = 0.01)
+                 numericInput("age", "Idade (anos):", value = 50, min = 0, max = 120),
+                 numericInput("cretmg", "Creatinina (mg/dL):", value = 1.2, min = 0.1, max = 20),
+                 selectInput("sexe_male", "Sexo:", choices = c("Masculino" = 1, "Feminino" = 0)),
+                 
+                 tags$hr(),
+                 tags$b("⚠ Altura (apenas para crianças - Bedside Schwartz)"),
+                 numericInput("height", "Altura (cm):", value = 160, min = 30, max = 220),
+                 
+                 tags$hr(),
+                 tags$b("⚠ ACR (Albumina/Creatinina mg/g):"),
+                 numericInput("acr", "ACR (mg/g):", value = 50, min = 0.1, max = 5000),
+                 
+                 tags$hr(),
+                 actionButton("predict_btn", "Calcular")
                ),
                
                mainPanel(
-                 htmlOutput("kdpi_title"),
-                 htmlOutput("kdpi_result"),
-                 
-                 tags$h3("KDRI value", style = "color:#7f8c8d; font-weight:bold; margin-top:30px;"),
-                 htmlOutput("kdr_result"),
-                 
-                 br(),
-                 downloadButton("export_txt", "Export as TXT", class = "btn-primary"),
-                 br(), br(),
-                 actionButton("reset_btn", "Clear Fields", class = "btn btn-warning"),
-                 br(), br(),
-                 actionButton("share_btn", "Share via Email", class = "btn btn-success", 
-                              onclick = "window.location.href='mailto:?subject=KDPI Calculator&body=Check out this KDPI calculator: https://transplantmodels.shinyapps.io/kdpi/'"),
-                 br(), br(),
-                 actionButton("whatsapp_btn", "Share via WhatsApp", class = "btn btn-success",
-                              onclick = "window.open('https://wa.me/?text=Check%20out%20this%20KDPI%20calculator:%20https://transplantmodels.shinyapps.io/kdpi/', '_blank')")
+                 h3("Resultados:"),
+                 htmlOutput("prediction_ml"),
+                 htmlOutput("prediction_ckdepi"),
+                 htmlOutput("prediction_schwartz"),
+                 tags$hr(),
+                 h3("Risco de Progressão para Kidney Failure (KFRE 5 anos):"),
+                 htmlOutput("kfre_5yr"),
+                 tags$hr(),
+                 tags$p("Classificação de risco baseada na KFRE 5 anos:"),
+                 tags$p("0–5%: Baixo risco (verde); 5–15%: Risco intermediário (amarelo); >15%: Alto risco (vermelho).")
                )
              )
-           )
-  ),
-  
-  tabPanel("What is KDPI and KDRI?",
-           fluidPage(
-             br(),
-             h3("What is KDPI and KDRI?", style = "font-weight:bold;"),
-             p("The Kidney Donor Profile Index (KDPI) is a percentile score (0-100%) that estimates the relative quality of a deceased donor kidney compared to other recovered kidneys."),
-             p("The Kidney Donor Risk Index (KDRI) is a continuous numerical score that quantifies the relative risk of graft failure after transplant, based on 10 donor characteristics."),
-             p("KDPI is directly derived from the KDRI, and represents the donor's risk as a percentile based on national data from OPTN/UNOS."),
-             p("KDRI values are normalized by a scaling factor based on the median KDRI from the previous year. We used de scale Factor for 2024: 1.38 based on the OPTN databse"),
-             p("The reference donor used by Rao et al. (2009) is defined as a 40-year-old, 170 cm tall, 80 kg, non-black donor, with no hypertension or diabetes, cause of death not being CVA, serum creatinine of 1.0 mg/dL, HCV negative, and not a DCD."),
-             p(em("Reference: Rao PS, Schaubel DE, Guidinger MK, et al. A Comprehensive Risk Quantification Score for Deceased Donor Kidneys: The Kidney Donor Risk Index. Transplantation. 2009; 88(2):231-236."))
-           )
-  ),
-  
-  tabPanel("Terms of Use",
-           fluidPage(
-             br(),
-             h3("Terms of Use", style = "font-weight:bold;"),
-             p("This application is intended for educational and informational use only. It does not replace professional clinical judgment."),
-             p("KDPI and KDRI are calculated based solely on donor characteristics and must be interpreted alongside clinical, surgical, and logistical considerations."),
-             p("The calculation is based on the 'transplantr' R package (v0.2.0), which implements the OPTN/UNOS equations. The 'dplyr' package is also required."),
-             p("The developers do not take responsibility for clinical decisions made based on the results."),
-             p("This app does not modify any of the underlying formulas from 'transplantr'. It simply provides a user-friendly interface for accessing them.")
-           )
-  ),
-  
-  tabPanel("About the Developer",
-           fluidPage(
-             br(),
-             h3("Developer Information", style = "font-weight:bold;"),
-             p("This KDPI calculator was developed by Dr. Gustavo Modelli, Nephrologist and Clinical Researcher at UNESP Botucatu, Brazil."),
-             p("The application aims to support clinical decision-making and education in the field of kidney transplantation."),
+    ),
+    
+    # Aba de Referências
+    tabPanel("Referências",
+             tags$h4("Referências utilizadas na aplicação:"),
+             tags$ul(
+               tags$li("Tangri N, Stevens LA, Griffith J, et al. A predictive model for progression of chronic kidney disease to kidney failure. JAMA. 2011;305(15):1553-9. doi:10.1001/jama.2011.451"),
+               tags$li("Tangri N, Grams ME, Levey AS, et al. Multinational Assessment of Accuracy of Equations for Predicting Risk of Kidney Failure: A Meta-analysis. JAMA. 2016;315(2):164-74. doi:10.1001/jama.2015.18202"),
+               tags$li("KDIGO 2012 Clinical Practice Guideline for the Evaluation and Management of Chronic Kidney Disease. Kidney Int Suppl. 2013;3(1):1-150. doi:10.1038/kisup.2012.73"),
+               tags$li("Levey AS, Stevens LA, Schmid CH, et al. A new equation to estimate glomerular filtration rate. Ann Intern Med. 2009;150(9):604–612. doi:10.7326/0003-4819-150-9-200905050-00006"),
+               tags$li("Andrade LGM, et al. Are machine learning models better than the current equations used to estimate glomerular filtration? FAPESP Project: https://bv.fapesp.br/en/bolsas/210345/are-machine-learning-models-better-than-the-current-equations-used-to-estimate-glomerular-filtration/")
+             ),
              tags$hr(),
-             tags$p("For questions, suggestions, or collaborations, feel free to contact:"),
-             tags$p(strong("Name: "), "Gustavo Modelli"),
-             tags$p(strong("Email: "), 
-                    tags$a(href = "mailto:gustavo.modelli@unesp.br", "gustavo.modelli@unesp.br", style = "color:#2980b9; font-weight:bold;")),
-             tags$br(),
-             actionButton("email_btn", "Send Email", onclick = "window.location.href='mailto:gustavo.modelli@unesp.br'")
-           )
+             tags$h5("Desenvolvedor da aplicação:"),
+             tags$p("Luis Gustavo Modelli de Andrade"),
+             tags$p("E-mail para contato: gustavo.modelli@unesp.br"),
+             tags$hr(),
+             tags$p("Esta calculadora foi desenvolvida para suporte clínico e não substitui o julgamento médico.")
+    )
   )
 )
 
-server <- function(input, output, session) {
-  data_input <- reactive({
-    data.frame(
+server <- function(input, output) {
+  
+  prediction_result <- eventReactive(input$predict_btn, {
+    
+    new_data <- data.frame(
       age = input$age,
-      height = input$height,
-      weight = input$weight,
-      eth = input$eth,
-      htn = as.numeric(input$htn),
-      dm = as.numeric(input$dm),
-      cva = as.numeric(input$cva),
-      creat = input$creat,
-      hcv = as.numeric(input$hcv),
-      dcd = as.numeric(input$dcd),
-      scaling = input$scaling
+      cretmg = input$cretmg,
+      sexe_male = as.numeric(input$sexe_male)
+    )
+    
+    new_data_matrix <- as.matrix(new_data)
+    predicted_ml <- predict(model, new_data_matrix)
+    predicted_ml <- max(predicted_ml, 0.1)
+    
+    sexe_text <- ifelse(as.numeric(input$sexe_male) == 1, "male", "female")
+    age <- input$age
+    cretmg <- input$cretmg
+    
+    predicted_ckdepi <- NA
+    if (age >= 18) {
+      predicted_ckdepi <- case_when(
+        sexe_text == "female" & cretmg <= 0.7 ~ 143 * ((cretmg/0.7)^-0.241) * (0.9938^age),
+        sexe_text == "female" & cretmg > 0.7 ~ 143 * ((cretmg/0.7)^-1.200) * (0.9938^age),
+        sexe_text == "male" & cretmg <= 0.9 ~ 142 * ((cretmg/0.9)^-0.302) * (0.9938^age),
+        sexe_text == "male" & cretmg > 0.9 ~ 142 * ((cretmg/0.9)^-1.200) * (0.9938^age)
+      )
+    }
+    
+    predicted_schwartz <- NA
+    if (age < 18) {
+      height_cm <- input$height
+      predicted_schwartz <- 0.413 * (height_cm / cretmg)
+    }
+    
+    acr <- input$acr
+    sex_num <- as.numeric(input$sexe_male)
+    
+    risk_5yr <- kfremodel_new(age, sex_num, predicted_ml, acr)
+    
+    list(
+      ml = predicted_ml, 
+      ckdepi = predicted_ckdepi, 
+      schwartz = predicted_schwartz,
+      kfre_5yr = risk_5yr
     )
   })
   
-  output$kdpi_title <- renderUI({
-    data <- data_input()
-    value <- kdpi(
-      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
-      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
-    )
-    
-    color <- if (value <= 35) {
-      "#27ae60"  # verde
-    } else if (value <= 84) {
-      "#f39c12"  # amarelo
+  output$prediction_ml <- renderUI({
+    req(prediction_result())
+    HTML(paste0("<span style='color:blue;'>eGFR (Machine Learning): ", 
+                round(prediction_result()$ml, 2), " ml/min/1.73m²</span>"))
+  })
+  
+  output$prediction_ckdepi <- renderUI({
+    req(prediction_result())
+    if (!is.na(prediction_result()$ckdepi)) {
+      HTML(paste0("<span style='color:blue;'>eGFR (CKD-EPI 2021): ", 
+                  round(prediction_result()$ckdepi, 2), " ml/min/1.73m²</span>"))
     } else {
-      "#c0392b"  # vermelho
+      HTML("<span style='color:red;'>CKD-EPI 2021 não aplicável para idade < 18 anos.</span>")
     }
-    
-    HTML(paste0("<h3 style='color:", color, "; font-weight:bold;'>KDPI value</h3>"))
   })
   
-  output$kdpi_result <- renderUI({
-    data <- data_input()
-    value <- kdpi(
-      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
-      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
-    )
-    
-    color <- if (value <= 35) {
-      "#27ae60"
-    } else if (value <= 84) {
-      "#f39c12"
+  output$prediction_schwartz <- renderUI({
+    req(prediction_result())
+    if (!is.na(prediction_result()$schwartz)) {
+      HTML(paste0("<span style='color:blue;'>eGFR (Bedside Schwartz): ", 
+                  round(prediction_result()$schwartz, 2), " ml/min/1.73m²</span>"))
     } else {
-      "#c0392b"
+      HTML("<span style='color:red;'>Bedside Schwartz não aplicável para idade ≥ 18 anos.</span>")
     }
+  })
+  
+  output$kfre_5yr <- renderUI({
+    req(prediction_result())
+    risk_percent <- round(prediction_result()$kfre_5yr * 100, 1)
     
-    HTML(paste0(
-      "<div style='font-size:24px; font-weight:bold; color:", color, ";'>",
-      round(value, 2), "%</div>"
-    ))
+    color <- ifelse(risk_percent <= 5, "green",
+                    ifelse(risk_percent <= 15, "orange", "red"))
+    
+    egfr <- prediction_result()$ml
+    gfr_stage <- ifelse(egfr >= 90, "G1 (Função normal ou alta)",
+                        ifelse(egfr >= 60, "G2 (Leve redução)",
+                               ifelse(egfr >= 45, "G3a (Redução leve a moderada)",
+                                      ifelse(egfr >= 30, "G3b (Redução moderada a severa)",
+                                             ifelse(egfr >= 15, "G4 (Redução severa)", "G5 (Falência renal)")))))
+    
+    HTML(paste0("<b>Risco 5 anos (KFRE): </b>",
+                "<span style='color:", color, "; font-weight:bold;'>",
+                risk_percent, "%</span><br><br>",
+                "<b>Classificação do Estágio de Função Renal: </b>", gfr_stage))
   })
   
-  output$kdr_result <- renderUI({
-    data <- data_input()
-    value <- uskdri(
-      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
-      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
-    )
-    HTML(paste0("<div style='font-size:24px; color:#7f8c8d;'><strong>", round(value, 3), "</strong></div>"))
-  })
-  
-  output$export_txt <- downloadHandler(
-    filename = function() {
-      paste0("kdpi_results_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt")
-    },
-    content = function(file) {
-      data <- data_input()
-      kdpi_val <- kdpi(
-        age = data$age, height = data$height, weight = data$weight, eth = data$eth,
-        htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-        hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
-      )
-      kdri_val <- uskdri(
-        age = data$age, height = data$height, weight = data$weight, eth = data$eth,
-        htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
-        hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
-      )
-      timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
-      result <- paste(
-        "KDPI/KDRI Calculation Summary",
-        "-----------------------------",
-        paste("Date and Time:", timestamp),
-        "",
-        "Donor Information:",
-        paste("Age:", data$age, "years"),
-        paste("Height:", data$height, "cm"),
-        paste("Weight:", data$weight, "kg"),
-        paste("Ethnicity:", data$eth),
-        paste("History of Hypertension:", ifelse(data$htn == 1, "Yes", "No")),
-        paste("History of Diabetes:", ifelse(data$dm == 1, "Yes", "No")),
-        paste("Cause of Death: CVA:", ifelse(data$cva == 1, "Yes", "No")),
-        paste("Serum Creatinine:", data$creat, "mg/dL"),
-        paste("Hepatitis C:", ifelse(data$hcv == 1, "Yes", "No")),
-        paste("Donation after Circulatory Death:", ifelse(data$dcd == 1, "Yes", "No")),
-        "",
-        "Results:",
-        paste("KDPI:", round(kdpi_val, 2), "%"),
-        paste("KDRI:", round(kdri_val, 3)),
-        sep = "\n"
-      )
-      writeLines(result, con = file)
-    }
-  )
-  
-  observeEvent(input$reset_btn, {
-    updateNumericInput(session, "age", value = 40)
-    updateNumericInput(session, "height", value = 170)
-    updateNumericInput(session, "weight", value = 80)
-    updateSelectInput(session, "eth", selected = "non-black")
-    updateSelectInput(session, "htn", selected = "0")
-    updateSelectInput(session, "dm", selected = "0")
-    updateSelectInput(session, "cva", selected = "0")
-    updateNumericInput(session, "creat", value = 1)
-    updateSelectInput(session, "hcv", selected = "0")
-    updateSelectInput(session, "dcd", selected = "0")
-    updateNumericInput(session, "scaling", value = 1.3816)
-  })
 }
 
 shinyApp(ui = ui, server = server)
-
