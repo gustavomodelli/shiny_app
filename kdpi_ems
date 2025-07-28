@@ -14,7 +14,7 @@ ui <- navbarPage(
                  numericInput("age", "Idade (anos)", value = 40, min = 0, max = 100),
                  numericInput("height", "Altura (cm)", value = 170, min = 50, max = 250),
                  numericInput("weight", "Peso (kg)", value = 80, min = 20, max = 200),
-                 selectInput("eth", "Etnia", choices = c("nao negra", "negra")),
+                 selectInput("eth", "Etnia", choices = c("nao negra" = 'non-black', "negra" = 'black')),
                  selectInput("htn", "Historico de Hipertensao", choices = c("Nao" = 0, "Sim" = 1)),
                  selectInput("dm", "Historico de Diabetes", choices = c("Nao" = 0, "Sim" = 1)),
                  selectInput("cva", "Causa do Obito: AVC", choices = c("Nao" = 0, "Sim" = 1)),
