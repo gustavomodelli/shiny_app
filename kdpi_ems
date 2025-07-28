@@ -1,0 +1,216 @@
+library(shiny)
+library(dplyr)
+library(transplantr)
+
+ui <- navbarPage(
+  "Calculadora KDPI",
+  
+  tabPanel("Calculadora",
+           fluidPage(
+             tags$h1("Calculadora de KDPI", style = "text-align:center; color:#2c3e50; font-weight:bold; margin-bottom:30px;"),
+             
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("age", "Idade (anos)", value = 40, min = 0, max = 100),
+                 numericInput("height", "Altura (cm)", value = 170, min = 50, max = 250),
+                 numericInput("weight", "Peso (kg)", value = 80, min = 20, max = 200),
+                 selectInput("eth", "Etnia", choices = c("nao negra", "negra")),
+                 selectInput("htn", "Historico de Hipertensao", choices = c("Nao" = 0, "Sim" = 1)),
+                 selectInput("dm", "Historico de Diabetes", choices = c("Nao" = 0, "Sim" = 1)),
+                 selectInput("cva", "Causa do Obito: AVC", choices = c("Nao" = 0, "Sim" = 1)),
+                 numericInput("creat", "Creatinina Serica (mg/dL)", value = 1, min = 0, step = 0.1),
+                 selectInput("hcv", "Hepatite C", choices = c("Nao" = 0, "Sim" = 1)),
+                 selectInput("dcd", "Doacao Apos Parada Circulatoria (DCD)", choices = c("Nao" = 0, "Sim" = 1)),
+                 numericInput("scaling", "Fator de Escala", value = 1.3816, min = 0.5, max = 2, step = 0.01),
+                 
+                 actionButton("calc_btn", "Calcular KDPI", class = "btn btn-primary")
+               ),
+               
+               mainPanel(
+                 uiOutput("kdpi_title"),
+                 uiOutput("kdpi_result"),
+                 
+                 tags$h3("Valor do KDRI", style = "color:#7f8c8d; font-weight:bold; margin-top:30px;"),
+                 uiOutput("kdr_result"),
+                 
+                 br(),
+                 downloadButton("export_txt", "Exportar como TXT", class = "btn-primary"),
+                 br(), br(),
+                 actionButton("reset_btn", "Limpar Campos", class = "btn btn-warning"),
+                 br(), br(),
+                 actionButton("share_btn", "Compartilhar por Email", class = "btn btn-success",
+                              onclick = "window.location.href='mailto:?subject=Calculadora KDPI&body=Confira esta calculadora de KDPI: https://transplantmodels.shinyapps.io/kdpi/'"),
+                 br(), br(),
+                 actionButton("whatsapp_btn", "Compartilhar via WhatsApp", class = "btn btn-success",
+                              onclick = "window.open('https://wa.me/?text=Confira%20esta%20calculadora%20de%20KDPI:%20https://transplantmodels.shinyapps.io/kdpi/', '_blank')"),
+                 br(), br(), br(),
+                 
+                 tags$div(
+                   style = "text-align:center;",
+                   tags$p("Apoio: EMS Farmaceutica", style = "font-weight:bold; color:#2c3e50; font-size:16px;"),
+                   tags$img(src = "ems.logo.png", height = "80px")
+                 )
+               )
+             )
+           )
+  ),
+  
+  tabPanel("O que sao KDPI e KDRI?",
+           fluidPage(
+             br(),
+             h3("O que sao KDPI e KDRI?", style = "font-weight:bold;"),
+             p("O KDPI e uma pontuacao percentual que estima a qualidade relativa de um rim de doador falecido."),
+             p("O KDRI e um indice continuo que estima o risco de falencia do enxerto com base em caracteristicas do doador."),
+             p("KDPI e derivado do KDRI e normalizado pelo fator de escala do ano vigente (1.3816 para 2024, segundo OPTN/UNOS)."),
+             p("O doador de referencia tem: 40 anos, 170 cm, 80 kg, nao negro, sem hipertensao ou diabetes, creatinina 1 mg/dL, HCV negativo e nao DCD."),
+             p(em("Referencia: Rao PS et al. Transplantation. 2009; 88(2):231–236."))
+           )
+  ),
+  
+  tabPanel("Termos de Uso",
+           fluidPage(
+             br(),
+             h3("Termos de Uso", style = "font-weight:bold;"),
+             p("Este aplicativo e apenas para fins educacionais e informativos."),
+             p("KDPI e KDRI devem ser interpretados junto com variaveis clinicas, cirurgicas e logisticas."),
+             p("Baseado no pacote R 'transplantr'. Nenhuma formula foi alterada."),
+             p("Os autores nao se responsabilizam por decisoes clinicas baseadas neste app.")
+           )
+  ),
+  
+  tabPanel("Sobre o Desenvolvedor",
+           fluidPage(
+             br(),
+             h3("Informacoes sobre o Desenvolvedor", style = "font-weight:bold;"),
+             p("Esta calculadora foi desenvolvida pelo Dr. Gustavo Modelli, Nefrologista e Pesquisador Clinico na UNESP Botucatu."),
+             p("Objetiva apoiar decisoes clinicas e educacao em transplante renal."),
+             tags$hr(),
+             tags$p("Contato para duvidas ou sugestoes:"),
+             tags$p(strong("Nome: "), "Gustavo Modelli"),
+             tags$p(strong("Email: "), 
+                    tags$a(href = "mailto:gustavo.modelli@unesp.br", "gustavo.modelli@unesp.br", style = "color:#2980b9; font-weight:bold;")),
+             tags$br(),
+             actionButton("email_btn", "Enviar Email", onclick = "window.location.href='mailto:gustavo.modelli@unesp.br'")
+           )
+  )
+)
+
+server <- function(input, output, session) {
+  values <- reactiveValues(calc = FALSE)
+  
+  observeEvent(input$calc_btn, {
+    values$calc <- TRUE
+  })
+  
+  data_input <- reactive({
+    req(values$calc)
+    data.frame(
+      age = input$age,
+      height = input$height,
+      weight = input$weight,
+      eth = input$eth,
+      htn = as.numeric(input$htn),
+      dm = as.numeric(input$dm),
+      cva = as.numeric(input$cva),
+      creat = input$creat,
+      hcv = as.numeric(input$hcv),
+      dcd = as.numeric(input$dcd),
+      scaling = input$scaling
+    )
+  })
+  
+  output$kdpi_title <- renderUI({
+    req(values$calc)
+    data <- data_input()
+    value <- kdpi(
+      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
+    )
+    color <- if (value <= 35) "#27ae60" else if (value <= 84) "#f39c12" else "#c0392b"
+    HTML(paste0("<h3 style='color:", color, "; font-weight:bold;'>Valor do KDPI</h3>"))
+  })
+  
+  output$kdpi_result <- renderUI({
+    req(values$calc)
+    data <- data_input()
+    value <- kdpi(
+      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
+    )
+    color <- if (value <= 35) "#27ae60" else if (value <= 84) "#f39c12" else "#c0392b"
+    HTML(paste0("<div style='font-size:24px; font-weight:bold; color:", color, ";'>", round(value, 2), "%</div>"))
+  })
+  
+  output$kdr_result <- renderUI({
+    req(values$calc)
+    data <- data_input()
+    value <- uskdri(
+      age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+      htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+      hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
+    )
+    HTML(paste0("<div style='font-size:24px; color:#7f8c8d;'><strong>", round(value, 3), "</strong></div>"))
+  })
+  
+  output$export_txt <- downloadHandler(
+    filename = function() {
+      paste0("resultados_kdpi_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt")
+    },
+    content = function(file) {
+      data <- data_input()
+      kdpi_val <- kdpi(
+        age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+        htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+        hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
+      )
+      kdri_val <- uskdri(
+        age = data$age, height = data$height, weight = data$weight, eth = data$eth,
+        htn = data$htn, dm = data$dm, cva = data$cva, creat = data$creat,
+        hcv = data$hcv, dcd = data$dcd, units = "US", scaling = data$scaling
+      )
+      timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+      result <- paste(
+        "Resumo do Calculo KDPI/KDRI",
+        "-----------------------------",
+        paste("Data e Hora:", timestamp),
+        "",
+        "Informacoes do Doador:",
+        paste("Idade:", data$age, "anos"),
+        paste("Altura:", data$height, "cm"),
+        paste("Peso:", data$weight, "kg"),
+        paste("Etnia:", data$eth),
+        paste("Historico de Hipertensao:", ifelse(data$htn == 1, "Sim", "Nao")),
+        paste("Historico de Diabetes:", ifelse(data$dm == 1, "Sim", "Nao")),
+        paste("Causa do Obito: AVC:", ifelse(data$cva == 1, "Sim", "Nao")),
+        paste("Creatinina Serica:", data$creat, "mg/dL"),
+        paste("Hepatite C:", ifelse(data$hcv == 1, "Sim", "Nao")),
+        paste("Doacao apos Parada Circulatoria:", ifelse(data$dcd == 1, "Sim", "Nao")),
+        "",
+        "Resultados:",
+        paste("KDPI:", round(kdpi_val, 2), "%"),
+        paste("KDRI:", round(kdri_val, 3)),
+        sep = "\n"
+      )
+      writeLines(result, con = file)
+    }
+  )
+  
+  observeEvent(input$reset_btn, {
+    updateNumericInput(session, "age", value = 40)
+    updateNumericInput(session, "height", value = 170)
+    updateNumericInput(session, "weight", value = 80)
+    updateSelectInput(session, "eth", selected = "nao negra")
+    updateSelectInput(session, "htn", selected = "0")
+    updateSelectInput(session, "dm", selected = "0")
+    updateSelectInput(session, "cva", selected = "0")
+    updateNumericInput(session, "creat", value = 1)
+    updateSelectInput(session, "hcv", selected = "0")
+    updateSelectInput(session, "dcd", selected = "0")
+    updateNumericInput(session, "scaling", value = 1.3816)
+    values$calc <- FALSE
+  })
+}
+
+shinyApp(ui = ui, server = server)
