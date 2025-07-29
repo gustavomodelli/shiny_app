@@ -5,8 +5,27 @@ library(transplantr)
 ui <- navbarPage(
   "Calculadora KDPI",
   
+  tags$head(
+    tags$link(rel = "manifest", href = "manifest.json"),
+    tags$meta(name = "mobile-web-app-capable", content = "yes"),
+    tags$meta(name = "apple-mobile-web-app-capable", content = "yes"),
+    tags$meta(name = "theme-color", content = "#2c3e50"),
+    tags$link(rel = "apple-touch-icon", href = "icons/icon-192.png"),
+    tags$script(HTML("
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('service-worker.js')
+          .then(function(registration) {
+            console.log('Service Worker registered with scope:', registration.scope);
+          }).catch(function(error) {
+            console.log('Service Worker registration failed:', error);
+          });
+      }
+    "))
+  ),
+  
   tabPanel("Calculadora",
            fluidPage(
+             
              tags$h1("Calculadora de KDPI", style = "text-align:center; color:#2c3e50; font-weight:bold; margin-bottom:30px;"),
              
              sidebarLayout(
