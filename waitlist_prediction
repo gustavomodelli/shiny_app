@@ -1,0 +1,291 @@
+# app.R — FINAL (robust) ORSF survival Shiny app
+# - Loads bundled tidymodels workflow from "orsf_workflow.rds"
+# - Manual inputs only (no CSV upload)
+# - Age categorical select; HLA numeric; painel_bin categorical
+# - Hidden predictor transplante_bin is injected as numeric 0 by default
+# - Outputs transplant probability (1 - S(t)) at 12/24/36/48/60 months
+# - Estimates median time-to-event from predicted survival curve
+
+options(shiny.fullstacktrace = TRUE)
+
+# -------------------------
+# Packages & checks
+# -------------------------
+needed <- c("shiny","tidymodels","censored","bundle","workflows","recipes",
+            "parsnip","dplyr","purrr","tidyr","readr","tibble")
+miss <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+if (length(miss)) stop("Missing packages: ", paste(miss, collapse = ", "),
+                       "
+Please install them before running the app.")
+
+library(shiny)
+library(tidymodels)
+library(censored)
+library(bundle)
+library(workflows)
+library(recipes)
+library(parsnip)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(readr)
+library(tibble)
+
+# -------------------------
+# Config
+# -------------------------
+model_path  <- "orsf_workflow.rds"         # must be in the same folder as this app.R
+short_times <- c(12, 24, 36, 48, 60)        # months
+grid_times  <- 1:120                        # months, for median estimate
+
+if (!file.exists(model_path)) stop("File not found: ", model_path)
+
+# -------------------------
+# Load model & recipe
+# -------------------------
+wf <- bundle::unbundle(readRDS(model_path))
+rec <- try(workflows::extract_recipe(wf), silent = TRUE)
+if (inherits(rec, "try-error") || is.null(rec)) {
+  stop("This app expects a workflow with a trained recipe embedded.")
+}
+
+pred_info   <- rec$var_info %>% dplyr::filter(role == "predictor")
+levels_list <- rec$levels
+
+# Provide explicit fallbacks if the recipe didn't store these levels
+if (is.null(levels_list[["hla_DR_identity"]])) levels_list[["hla_DR_identity"]] <- c("identity","not_identity")
+if (is.null(levels_list[["hla_B_identity"]]))  levels_list[["hla_B_identity"]]  <- c("identity","not_identity")
+if (is.null(levels_list[["age"]]))             levels_list[["age"]]             <- c("<18","18 to 60",">60")
+if (is.null(levels_list[["painel_bin"]]))      levels_list[["painel_bin"]]      <- c("0","1")
+
+# Predictor order used by the recipe (we will match this for prediction)
+predictor_order <- pred_info$variable
+
+# Hide from UI but inject defaults into prediction data
+hidden_predictors <- c("transplante_bin")
+ui_predictors     <- setdiff(predictor_order, hidden_predictors)
+hidden_defaults   <- list(transplante_bin = 0)
+
+# -------------------------
+# Type overrides (requested): Age categorical; identity flags categorical; HLA numeric; painel_bin categorical
+# -------------------------
+numeric_force <- c(
+  "time_dialysis_ys",
+  "hla_dr1","hla_dr2","hla_b1","hla_b2","hla_a1","hla_a2"
+)
+
+get_pred_type <- function(v){
+  if (v %in% numeric_force) return("numeric")
+  if (v %in% c("hla_DR_identity","hla_B_identity")) return("nominal")
+  if (v == "age")          return("nominal")
+  if (v == "painel_bin")   return("nominal")
+  if (v == "transplante_bin") return("numeric")
+  # fallback to recipe-declared type
+  pred_info$type[pred_info$variable == v][1]
+}
+
+# -------------------------
+# Helpers
+# -------------------------
+# Build a one-row tibble from UI inputs, casting by desired type
+build_manual_row <- function(input){
+  vals <- purrr::map(ui_predictors, function(v){
+    tp <- get_pred_type(v)
+    if (tp %in% c("numeric","double","integer")) {
+      suppressWarnings(as.numeric(input[[v]]))
+    } else {
+      lv <- levels_list[[v]]
+      if (!is.null(lv)) factor(input[[v]], levels = lv) else as.character(input[[v]])
+    }
+  })
+  tibble::as_tibble(stats::setNames(vals, ui_predictors))
+}
+
+coerce_factor_columns <- function(df){
+  for (v in names(df)) {
+    if (get_pred_type(v) %in% c("factor","nominal","character","ordered","unordered")) {
+      lv <- levels_list[[v]]
+      if (!is.null(lv) && v %in% names(df)) df[[v]] <- factor(df[[v]], levels = lv)
+    }
+  }
+  df
+}
+
+coerce_numeric_columns <- function(df){
+  for (v in names(df)) {
+    if (get_pred_type(v) %in% c("numeric","double","integer")) {
+      df[[v]] <- suppressWarnings(as.numeric(df[[v]]))
+    }
+  }
+  df
+}
+
+# Example case defaults (for quick testing)
+example_case <- list(
+  age = '18 to 60',
+  underline_disease = 'Indeterminate',
+  painel_bin = '0',
+  time_dialysis_ys = 1,
+  ABO_group = 'O',
+  centro = 'SP_Capital',
+  prior_tx = 'Não',
+  hla_DR_identity = 'not_identity',
+  hla_B_identity = 'not_identity',
+  sorologia_anti_hbs = 'Não',
+  hla_dr1 = 3,
+  hla_dr2 = 4,
+  hla_b1 = 7,
+  hla_b2 = 15,
+  hla_a1 = 2,
+  hla_a2 = 24
+)
+
+# -------------------------
+# UI
+# -------------------------
+ui <- fluidPage(
+  titlePanel("ORSF – Transplant Probability (Shiny)"),
+  sidebarLayout(
+    sidebarPanel(
+      tags$p("Provide predictors below."),
+      tags$hr(),
+      uiOutput("dynamic_inputs"),
+      actionButton("predict_btn", "Predict", class = "btn-primary"),
+      actionButton("fill_example", "Use example", class = "btn-secondary"),
+      width = 4
+    ),
+    mainPanel(
+      h3("Predicted transplant probability (1 - S(t))"),
+      tableOutput("risk_table"),
+      tags$br(),
+      h3("Median time-to-event (months)"),
+      tableOutput("median_table"),
+      tags$br(),
+      h3("Predicted survival curve (first row)"),
+      plotOutput("surv_plot", height = 350)
+    )
+  )
+)
+
+# -------------------------
+# Server
+# -------------------------
+server <- function(input, output, session){
+  
+  # Dynamic inputs built from recipe + overrides
+  output$dynamic_inputs <- renderUI({
+    tagList(
+      lapply(ui_predictors, function(v){
+        tp <- get_pred_type(v)
+        if (tp %in% c("numeric","double","integer")) {
+          numericInput(v, label = v, value = NA_real_)
+        } else {
+          lv <- levels_list[[v]]
+          if (!is.null(lv)) selectInput(v, label = v, choices = lv, selected = lv[1])
+          else textInput(v, label = paste0(v, " (text)"))
+        }
+      })
+    )
+  })
+  
+  # Fill with example defaults
+  observeEvent(input$fill_example, {
+    lapply(ui_predictors, function(v){
+      tp  <- get_pred_type(v)
+      val <- example_case[[v]]
+      if (is.null(val)) return(NULL)
+      if (tp %in% c("numeric","double","integer")) {
+        shiny::updateNumericInput(session, v, value = suppressWarnings(as.numeric(val)))
+      } else {
+        lv <- levels_list[[v]]
+        if (!is.null(lv)) {
+          sel <- if (!is.null(val) && val %in% lv) val else lv[1]
+          shiny::updateSelectInput(session, v, selected = sel)
+        } else {
+          shiny::updateTextInput(session, v, value = as.character(val))
+        }
+      }
+    })
+  })
+  
+  # Build input row (manual only)
+  input_data <- eventReactive(input$predict_btn, {
+    df <- build_manual_row(input)
+    df <- coerce_numeric_columns(df)
+    df <- coerce_factor_columns(df)
+    
+    # Add hidden predictors with defaults and correct type
+    need_hidden <- intersect(hidden_predictors, predictor_order)
+    for (hn in need_hidden) {
+      if (!hn %in% names(df)) {
+        tp  <- get_pred_type(hn)
+        val <- hidden_defaults[[hn]]
+        if (is.null(val)) val <- NA
+        if (tp %in% c("numeric","double","integer")) {
+          df[[hn]] <- suppressWarnings(as.numeric(val))
+        } else {
+          lv <- levels_list[[hn]]
+          if (!is.null(lv)) df[[hn]] <- factor(val, levels = lv) else df[[hn]] <- as.character(val)
+        }
+      }
+    }
+    
+    # Reorder columns to exactly match the recipe predictors
+    df <- df[, predictor_order, drop = FALSE]
+    df
+  }, ignoreInit = TRUE)
+  
+  # Predictions
+  preds <- reactive({
+    req(input_data())
+    nd <- input_data()
+    
+    # Survival predictions at requested times and grid
+    surv_short <- predict(wf, new_data = nd, type = "survival", eval_time = short_times)
+    surv_grid  <- predict(wf, new_data = nd, type = "survival", eval_time = grid_times)
+    
+    # Wide risks for short_times
+    surv_wide <- purrr::map_dfr(
+      surv_short$.pred,
+      ~{
+        df <- .x
+        df <- df[match(short_times, df$.eval_time), , drop = FALSE]
+        tibble::as_tibble_row(stats::setNames(as.list(df$.pred_survival), paste0("S_", df$.eval_time)))
+      },
+      .id = ".row"
+    )
+    
+    risk_wide <- surv_wide
+    for (nm in paste0("S_", short_times)) risk_wide[[nm]] <- 1 - risk_wide[[nm]]
+    names(risk_wide)[match(paste0("S_", short_times), names(risk_wide))] <- paste0("risk_", short_times)
+    
+    # Median time: first time grid where S(t) <= 0.5
+    median_vec <- purrr::map_dbl(surv_grid$.pred, function(df){
+      idx <- which(df$.pred_survival <= 0.5)[1]
+      if (!is.na(idx)) df$.eval_time[idx] else NA_real_
+    })
+    
+    list(risk = risk_wide, median = median_vec, surv_grid = surv_grid)
+  })
+  
+  output$risk_table <- renderTable({
+    req(preds())
+    preds()$risk
+  }, digits = 3)
+  
+  output$median_table <- renderTable({
+    req(preds())
+    tibble::tibble(row = seq_along(preds()$median), median_time = preds()$median)
+  }, digits = 1)
+  
+  output$surv_plot <- renderPlot({
+    req(preds())
+    df <- preds()$surv_grid$.pred[[1]]
+    plot(df$.eval_time, df$.pred_survival, type = "l",
+         xlab = "Time (months)", ylab = "Predicted survival S(t)",
+         main = "Predicted survival (first row)")
+    abline(h = 0.5, lty = 2)
+  })
+}
+
+shinyApp(ui, server)
