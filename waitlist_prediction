@@ -69,6 +69,10 @@ levels_list[["ABO_group"]] <- c("A","AB","B","O")
 # underline_disease explicit classes
 levels_list[["underline_disease"]] <- c("Diabetes","Glomerulonephritis","Hypertension","Indeterminate","Other")
 
+# explicit classes (pt-BR) for prior_tx and sorologia_anti_hbs
+levels_list[["prior_tx"]] <- c("Não","Sim")
+levels_list[["sorologia_anti_hbs"]] <- c("Não","Sim")
+
 # UI label → underlying value map (named vectors)
 ui_choice_map <- list(
   age = c(
@@ -99,6 +103,7 @@ get_pred_type <- function(v){
   if (v %in% c("hla_DR_identity","hla_B_identity")) return("nominal")
   if (v == "age")          return("nominal")
   if (v == "painel_bin")   return("nominal")
+  if (v %in% c("prior_tx","sorologia_anti_hbs")) return("nominal")
   if (v == "transplante_bin") return("numeric")
   # fallback to recipe-declared type
   pred_info$type[pred_info$variable == v][1]
