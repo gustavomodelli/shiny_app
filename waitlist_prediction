@@ -86,7 +86,7 @@ levels_list[["sorologia_anti_hbs"]] <- c("Não","Sim")
 predictor_order <- pred_info$variable
 
 # Hide from UI but inject defaults into prediction data
-hidden_predictors <- c("transplante_bin")
+hidden_predictors <- c("transplante_bin", "hla_DR_identity", "hla_B_identity")
 ui_predictors     <- setdiff(predictor_order, hidden_predictors)
 hidden_defaults   <- list(transplante_bin = 0)
 
@@ -204,13 +204,13 @@ server <- function(input, output, session){
       lapply(ui_predictors, function(v){
         tp <- get_pred_type(v)
         if (tp %in% c("numeric","double","integer")) {
-          numericInput(v, label = v, value = NA_real_)
+          numericInput(v, label = v, value = if (!is.null(example_case[[v]])) suppressWarnings(as.numeric(example_case[[v]])) else NA_real_)
         } else {
           lv <- levels_list[[v]]
           if (!is.null(lv)) {
-            selectInput(v, label = v, choices = lv, selected = lv[1])
+            selectInput(v, label = v, choices = lv, selected = if (!is.null(example_case[[v]]) && example_case[[v]] %in% lv) example_case[[v]] else lv[1])
           } else {
-            textInput(v, label = paste0(v, " (text)"))
+            textInput(v, label = paste0(v, " (text)"), value = if (!is.null(example_case[[v]])) as.character(example_case[[v]]) else "")
           }
         }
       })
@@ -241,6 +241,20 @@ server <- function(input, output, session){
   input_data <- eventReactive(input$predict_btn, {
     df <- build_manual_row(input)
     df <- coerce_numeric_columns(df)
+    
+    # --- Compute identity flags from allele pairs (hidden in UI) ---
+    df <- df %>% dplyr::mutate(
+      hla_DR_identity = dplyr::case_when(
+        !is.na(hla_dr1) & !is.na(hla_dr2) & hla_dr1 == hla_dr2 ~ "identity",
+        TRUE ~ "not_identity"
+      ),
+      hla_B_identity = dplyr::case_when(
+        !is.na(hla_b1) & !is.na(hla_b2) & hla_b1 == hla_b2 ~ "identity",
+        TRUE ~ "not_identity"
+      )
+    )
+    
+    # Coerce factors (apply levels after computing identities)
     df <- coerce_factor_columns(df)
     
     # Add hidden predictors with defaults and correct type
@@ -316,6 +330,8 @@ server <- function(input, output, session){
 }
 
 shinyApp(ui, server)
+
+
 
 
 
