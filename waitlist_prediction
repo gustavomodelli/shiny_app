@@ -15,7 +15,8 @@ needed <- c("shiny","tidymodels","censored","bundle","workflows","recipes",
             "parsnip","dplyr","purrr","tidyr","readr","tibble")
 miss <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
 if (length(miss)) stop("Missing packages: ", paste(miss, collapse = ", "),
-                       "\nPlease install them before running the app.")
+                       "
+Please install them before running the app.")
 
 library(shiny)
 library(tidymodels)
@@ -272,20 +273,22 @@ server <- function(input, output, session){
     surv_short <- predict(wf, new_data = nd, type = "survival", eval_time = short_times)
     surv_grid  <- predict(wf, new_data = nd, type = "survival", eval_time = grid_times)
     
-    # Wide risks for short_times
+    # Wide risks for short_times -> formatted as percentages without .row
     surv_wide <- purrr::map_dfr(
       surv_short$.pred,
       ~{
         df <- .x
         df <- df[match(short_times, df$.eval_time), , drop = FALSE]
-        tibble::as_tibble_row(stats::setNames(as.list(df$.pred_survival), paste0("S_", df$.eval_time)))
-      },
-      .id = ".row"
+        tibble::as_tibble_row(stats::setNames(as.list(df$.pred_survival), paste0("S_", short_times)))
+      }
     )
     
+    # Convert to transplant probability = (1 - S(t)) * 100 and label nicely
     risk_wide <- surv_wide
-    for (nm in paste0("S_", short_times)) risk_wide[[nm]] <- 1 - risk_wide[[nm]]
-    names(risk_wide)[match(paste0("S_", short_times), names(risk_wide))] <- paste0("risk_", short_times)
+    risk_cols <- paste0("S_", short_times)
+    risk_wide[risk_cols] <- lapply(risk_wide[risk_cols], function(x) (1 - x) * 100)
+    names(risk_wide) <- paste0("Tx at ", short_times, " mo")
+    risk_wide <- dplyr::mutate(risk_wide, dplyr::across(dplyr::everything(), ~ sprintf("%.1f%%", .)))
     
     # Median time: first time grid where S(t) <= 0.5
     median_vec <- purrr::map_dbl(surv_grid$.pred, function(df){
@@ -303,19 +306,16 @@ server <- function(input, output, session){
   
   output$median_table <- renderTable({
     req(preds())
-    tibble::tibble(row = seq_along(preds()$median), median_time = preds()$median)
-  }, digits = 1)
-  
-  output$surv_plot <- renderPlot({
-    req(preds())
-    df <- preds()$surv_grid$.pred[[1]]
-    plot(df$.eval_time, df$.pred_survival, type = "l",
-         xlab = "Time (months)", ylab = "Predicted survival S(t)",
-         main = "Predicted survival (first row)")
-    abline(h = 0.5, lty = 2)
-  })
+    med <- preds()$median
+    # Single-case UI: show one value, no row index
+    label <- ifelse(is.na(med[1]),
+                    paste0("Not reached by ", max(grid_times), " mo"),
+                    sprintf("%.1f", med[1]))
+    tibble::tibble(`Median time (mo)` = label)
+  }, sanitize.text.function = function(x) x)
 }
 
 shinyApp(ui, server)
+
 
 
