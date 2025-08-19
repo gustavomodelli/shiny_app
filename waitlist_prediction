@@ -1,10 +1,11 @@
-# app.R — FINAL CLEAN (robust) ORSF survival Shiny app
+# app.R — ORSF survival Shiny app (with About tab & WhatsApp share)
 # - Loads bundled tidymodels workflow from "orsf_workflow.rds"
 # - Manual inputs only (no CSV upload)
 # - Age categorical select; HLA numeric; painel_bin categorical
 # - Hidden predictor transplante_bin is injected as numeric 0 by default
-# - Outputs transplant probability (1 - S(t)) at 12/24/36/48/60 months
-# - Estimates median time-to-event from predicted survival curve
+# - Outputs transplant probability (1 - S(t)) at 12/24/36/48/60 months (in %)
+# - Estimates median time-to-event (or shows "Not reached by ... mo")
+# - NEW: "Sobre" tab with author info and email button; WhatsApp share button on main tab
 
 options(shiny.fullstacktrace = TRUE)
 
@@ -12,7 +13,7 @@ options(shiny.fullstacktrace = TRUE)
 # Packages & checks
 # -------------------------
 needed <- c("shiny","tidymodels","censored","bundle","workflows","recipes",
-            "parsnip","dplyr","purrr","tidyr","readr","tibble")
+            "parsnip","dplyr","purrr","tidyr","readr","tibble","aorsf","bonsai","embed")
 miss <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
 if (length(miss)) stop("Missing packages: ", paste(miss, collapse = ", "),
                        "
@@ -30,6 +31,9 @@ library(purrr)
 library(tidyr)
 library(readr)
 library(tibble)
+library(aorsf)
+library(bonsai)
+library(embed)
 
 # -------------------------
 # Config
@@ -37,6 +41,9 @@ library(tibble)
 model_path  <- "orsf_workflow.rds"         # must be in the same folder as this app.R
 short_times <- c(12, 24, 36, 48, 60)        # months
 grid_times  <- 1:120                        # months, for median estimate
+
+# Optional: silence reticulate warnings on servers without Python
+Sys.setenv(RETICULATE_PYTHON_FALLBACK = "1", RETICULATE_MINICONDA_ENABLED = "FALSE")
 
 if (!file.exists(model_path)) stop("File not found: ", model_path)
 
@@ -47,6 +54,12 @@ wf <- bundle::unbundle(readRDS(model_path))
 rec <- try(workflows::extract_recipe(wf), silent = TRUE)
 if (inherits(rec, "try-error") || is.null(rec)) {
   stop("This app expects a workflow with a trained recipe embedded.")
+}
+
+# Fail fast if recipe uses encoding steps from 'embed' and the pkg isn't available
+uses_lencode <- any(vapply(rec$steps, function(s) inherits(s, "step_lencode_glm"), logical(1)))
+if (uses_lencode && !requireNamespace("embed", quietly = TRUE)) {
+  stop("This workflow uses 'step_lencode_glm' from the 'embed' package. Please install.packages('embed') on the server.")
 }
 
 pred_info   <- rec$var_info %>% dplyr::filter(role == "predictor")
@@ -166,29 +179,65 @@ example_case <- list(
   hla_a2 = 24
 )
 
+# Build current app URL for sharing
+build_app_url <- function(session){
+  cd <- session$clientData
+  proto <- ifelse(identical(cd$url_protocol, "https:"), "https://", "http://")
+  host  <- cd$url_hostname
+  port  <- cd$url_port
+  path  <- cd$url_pathname
+  query <- cd$url_search
+  port_part <- if (nzchar(port) && !port %in% c("80","443")) paste0(":", port) else ""
+  paste0(proto, host, port_part, path, query)
+}
+
 # -------------------------
-# UI
+# UI (navbar with About tab)
 # -------------------------
-ui <- fluidPage(
-  titlePanel("ORSF – Transplant Probability (Shiny) – with explicit classes"),
-  sidebarLayout(
-    sidebarPanel(
-      tags$p("Provide predictors below."),
-      tags$hr(),
-      uiOutput("dynamic_inputs"),
-      actionButton("predict_btn", "Predict", class = "btn-primary"),
-      actionButton("fill_example", "Use example", class = "btn-secondary"),
-      width = 4
-    ),
-    mainPanel(
-      h3("Predicted transplant probability (1 - S(t))"),
-      tableOutput("risk_table"),
-      tags$br(),
-      h3("Median time-to-event (months)"),
-      tableOutput("median_table"),
-      tags$br(),
-      h3("Predicted transplantability curve (first row)"),
-      plotOutput("surv_plot", height = 350)
+ui <- navbarPage(
+  title = "ORSF – Transplant Probability (Shiny) – with explicit classes",
+  tabPanel(
+    "App",
+    fluidPage(
+      sidebarLayout(
+        sidebarPanel(
+          tags$p("Provide predictors below."),
+          tags$hr(),
+          uiOutput("dynamic_inputs"),
+          actionButton("predict_btn", "Predict", class = "btn-primary"),
+          actionButton("fill_example", "Use example", class = "btn-secondary"),
+          width = 4
+        ),
+        mainPanel(
+          uiOutput("whatsapp_btn"),
+          tags$br(),
+          h3("Predicted transplant probability (1 - S(t))"),
+          tableOutput("risk_table"),
+          tags$br(),
+          h3("Median time-to-event (months)"),
+          tableOutput("median_table"),
+          tags$br(),
+          h3("Predicted transplantability curve (first row)"),
+          plotOutput("surv_plot", height = 350)
+        )
+      )
+    )
+  ),
+  tabPanel(
+    "Sobre",
+    fluidPage(
+      h2("Sobre"),
+      tags$p("Desenvolvido por Luis Gustavo Modelli de Andrade."),
+      tags$p(
+        "Email: ",
+        tags$a(href = "mailto:gustavo.modelli@unesp.br", "gustavo.modelli@unesp.br")
+      ),
+      tags$a(
+        "Enviar email",
+        href = "mailto:gustavo.modelli@unesp.br",
+        class = "btn btn-primary",
+        target = "_blank"
+      )
     )
   )
 )
@@ -204,20 +253,31 @@ server <- function(input, output, session){
       lapply(ui_predictors, function(v){
         tp <- get_pred_type(v)
         if (tp %in% c("numeric","double","integer")) {
-          numericInput(v, label = v, value = if (!is.null(example_case[[v]])) suppressWarnings(as.numeric(example_case[[v]])) else NA_real_)
+          numericInput(v, label = v,
+                       value = if (!is.null(example_case[[v]])) suppressWarnings(as.numeric(example_case[[v]])) else NA_real_)
         } else {
           lv <- levels_list[[v]]
           if (!is.null(lv)) {
-            selectInput(v, label = v, choices = lv, selected = if (!is.null(example_case[[v]]) && example_case[[v]] %in% lv) example_case[[v]] else lv[1])
+            sel <- if (!is.null(example_case[[v]]) && example_case[[v]] %in% lv) example_case[[v]] else lv[1]
+            selectInput(v, label = v, choices = lv, selected = sel)
           } else {
-            textInput(v, label = paste0(v, " (text)"), value = if (!is.null(example_case[[v]])) as.character(example_case[[v]]) else "")
+            textInput(v, label = paste0(v, " (text)"),
+                      value = if (!is.null(example_case[[v]])) as.character(example_case[[v]]) else "")
           }
         }
       })
     )
   })
   
-  # Fill with example defaults
+  # WhatsApp share button (computed from current app URL)
+  output$whatsapp_btn <- renderUI({
+    url <- build_app_url(session)
+    txt <- utils::URLencode(paste0("Confira este app de predição de transplante: ", url), reserved = TRUE)
+    href <- paste0("https://wa.me/?text=", txt)
+    tags$a("Share to WhatsApp", href = href, target = "_blank", class = "btn btn-success")
+  })
+  
+  # Fill with example defaults (on click — inputs already prefilled above)
   observeEvent(input$fill_example, {
     lapply(ui_predictors, function(v){
       tp  <- get_pred_type(v)
@@ -321,13 +381,13 @@ server <- function(input, output, session){
   output$median_table <- renderTable({
     req(preds())
     med <- preds()$median
-    # Single-case UI: show one value, no row index
     label <- ifelse(is.na(med[1]),
                     paste0("Not reached by ", max(grid_times), " mo"),
                     sprintf("%.1f", med[1]))
     tibble::tibble(`Median time (mo)` = label)
   }, sanitize.text.function = function(x) x)
-  # --- Predicted transplantability curve (robust) ---
+  
+  # --- Predicted transplantability curve (first row) ---
   output$surv_plot <- renderPlot({
     req(preds())
     sg <- preds()$surv_grid
@@ -354,3 +414,4 @@ server <- function(input, output, session){
 }
 
 shinyApp(ui, server)
+
