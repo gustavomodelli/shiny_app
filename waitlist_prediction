@@ -68,6 +68,14 @@ levels_list[["ABO_group"]] <- c("A","AB","B","O")
 
 # underline_disease explicit classes
 levels_list[["underline_disease"]] <- c("Diabetes","Glomerulonephritis","Hypertension","Indeterminate","Other")
+# explicit center levels
+levels_list[["centro"]] <- c(
+  "Bahia","Belo Horizonte","Blumenau","Brasilia","Campo Grande","Cuiaba",
+  "Fortaleza","Goiania","Joao Pessoa","Juiz de Fora","Maceio","Manaus",
+  "Maranhao","Natal","Para","Parana","Piaui","Porto Alegre","Recife",
+  "Rio de Janeiro","Roraima","Salvador","SP_Capital","SP_Interior",
+  "Uberlandia","Vitoria"
+)
 
 # explicit classes (pt-BR) for prior_tx and sorologia_anti_hbs
 levels_list[["prior_tx"]] <- c("Não","Sim")
@@ -103,6 +111,7 @@ get_pred_type <- function(v){
   if (v %in% c("hla_DR_identity","hla_B_identity")) return("nominal")
   if (v == "age")          return("nominal")
   if (v == "painel_bin")   return("nominal")
+  if (v == "centro")       return("nominal")
   if (v %in% c("prior_tx","sorologia_anti_hbs")) return("nominal")
   if (v == "transplante_bin") return("numeric")
   # fallback to recipe-declared type
