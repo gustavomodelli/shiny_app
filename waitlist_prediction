@@ -1,23 +1,30 @@
-# app.R — ORSF survival Shiny app (with About tab & WhatsApp share)
+# app.R — ORSF survival Shiny app (clean rebuild)
 # - Loads bundled tidymodels workflow from "orsf_workflow.rds"
 # - Manual inputs only (no CSV upload)
 # - Age categorical select; HLA numeric; painel_bin categorical
 # - Hidden predictor transplante_bin is injected as numeric 0 by default
+# - Identity flags (hla_*_identity) are derived from allele pairs
 # - Outputs transplant probability (1 - S(t)) at 12/24/36/48/60 months (in %)
-# - Estimates median time-to-event (or shows "Not reached by ... mo")
-# - NEW: "Sobre" tab with author info and email button; WhatsApp share button on main tab
+# - Median time-to-event shown; if not reached, displays message
+# - "Sobre" tab with author info + mailto button; WhatsApp share button on main tab
 
 options(shiny.fullstacktrace = TRUE)
+
+# Silence reticulate noise on servers without Python
+Sys.setenv(RETICULATE_PYTHON_FALLBACK = "1",
+           RETICULATE_MINICONDA_ENABLED = "FALSE")
 
 # -------------------------
 # Packages & checks
 # -------------------------
-needed <- c("shiny","tidymodels","censored","bundle","workflows","recipes",
-            "parsnip","dplyr","purrr","tidyr","readr","tibble","aorsf","bonsai","embed")
+needed <- c(
+  "shiny","tidymodels","censored","bundle","workflows","recipes",
+  "parsnip","dplyr","purrr","tidyr","readr","tibble",
+  "aorsf","bonsai","embed"
+)
 miss <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
 if (length(miss)) stop("Missing packages: ", paste(miss, collapse = ", "),
-                       "
-Please install them before running the app.")
+                       "\nPlease install them before running the app.")
 
 library(shiny)
 library(tidymodels)
@@ -38,25 +45,22 @@ library(embed)
 # -------------------------
 # Config
 # -------------------------
-model_path  <- "orsf_workflow.rds"         # must be in the same folder as this app.R
-short_times <- c(12, 24, 36, 48, 60)        # months
-grid_times  <- 1:120                        # months, for median estimate
-
-# Optional: silence reticulate warnings on servers without Python
-Sys.setenv(RETICULATE_PYTHON_FALLBACK = "1", RETICULATE_MINICONDA_ENABLED = "FALSE")
+model_path  <- "orsf_workflow.rds"   # must be in the same folder as this app.R
+short_times <- c(12, 24, 36, 48, 60) # months
+grid_times  <- 1:120                 # months, for median estimate
 
 if (!file.exists(model_path)) stop("File not found: ", model_path)
 
 # -------------------------
 # Load model & recipe
 # -------------------------
-wf <- bundle::unbundle(readRDS(model_path))
+wf  <- bundle::unbundle(readRDS(model_path))
 rec <- try(workflows::extract_recipe(wf), silent = TRUE)
 if (inherits(rec, "try-error") || is.null(rec)) {
   stop("This app expects a workflow with a trained recipe embedded.")
 }
 
-# Fail fast if recipe uses encoding steps from 'embed' and the pkg isn't available
+# Check for supervised encoding steps from {embed}
 uses_lencode <- any(vapply(rec$steps, function(s) inherits(s, "step_lencode_glm"), logical(1)))
 if (uses_lencode && !requireNamespace("embed", quietly = TRUE)) {
   stop("This workflow uses 'step_lencode_glm' from the 'embed' package. Please install.packages('embed') on the server.")
@@ -65,7 +69,7 @@ if (uses_lencode && !requireNamespace("embed", quietly = TRUE)) {
 pred_info   <- rec$var_info %>% dplyr::filter(role == "predictor")
 levels_list <- rec$levels
 
-# ----- Explicit classes (front-end & for coercion) -----
+# ----- Explicit classes (front-end & coercion) -----
 # Identity flags (fallback if recipe didn't store levels)
 if (is.null(levels_list[["hla_DR_identity"]])) levels_list[["hla_DR_identity"]] <- c("identity","not_identity")
 if (is.null(levels_list[["hla_B_identity"]]))  levels_list[["hla_B_identity"]]  <- c("identity","not_identity")
@@ -73,7 +77,7 @@ if (is.null(levels_list[["hla_B_identity"]]))  levels_list[["hla_B_identity"]]  
 # Age EXACT levels (as provided)
 levels_list[["age"]] <- c("18 to 60","under 18","more than 60")
 
-# painel_bin categories
+# painel_bin categories (explicit)
 levels_list[["painel_bin"]] <- c("0","1-79","80-89","90-100")
 
 # ABO order
@@ -82,7 +86,7 @@ levels_list[["ABO_group"]] <- c("A","AB","B","O")
 # underline_disease explicit classes
 levels_list[["underline_disease"]] <- c("Diabetes","Glomerulonephritis","Hypertension","Indeterminate","Other")
 
-# centro explicit classes (without accents to match most training schemas)
+# centro explicit classes (no accents to match common training)
 levels_list[["centro"]] <- c(
   "Bahia","Belo Horizonte","Blumenau","Brasilia","Campo Grande","Cuiaba",
   "Fortaleza","Goiania","Joao Pessoa","Juiz de Fora","Maceio","Manaus",
@@ -92,19 +96,19 @@ levels_list[["centro"]] <- c(
 )
 
 # pt-BR binary factors
-levels_list[["prior_tx"]] <- c("Não","Sim")
+levels_list[["prior_tx"]]           <- c("Não","Sim")
 levels_list[["sorologia_anti_hbs"]] <- c("Não","Sim")
 
 # Predictor order used by the recipe (we will match this for prediction)
 predictor_order <- pred_info$variable
 
-# Hide from UI but inject defaults into prediction data
+# Hidden predictors (not shown in UI) with defaults
 hidden_predictors <- c("transplante_bin", "hla_DR_identity", "hla_B_identity")
 ui_predictors     <- setdiff(predictor_order, hidden_predictors)
 hidden_defaults   <- list(transplante_bin = 0)
 
 # -------------------------
-# Type overrides (requested): Age categorical; identity flags categorical; HLA numeric; painel_bin categorical
+# Types
 # -------------------------
 numeric_force <- c(
   "time_dialysis_ys",
@@ -126,7 +130,7 @@ get_pred_type <- function(v){
 # -------------------------
 # Helpers
 # -------------------------
-# Build a one-row tibble from UI inputs, casting by desired type
+# Build one-row tibble from UI inputs
 build_manual_row <- function(input){
   vals <- purrr::map(ui_predictors, function(v){
     tp <- get_pred_type(v)
@@ -159,18 +163,48 @@ coerce_numeric_columns <- function(df){
   df
 }
 
-# Example case defaults (for quick testing)
+# Robust prediction wrappers and validation
+safe_predict <- function(expr, context = "predict"){
+  tryCatch(expr, error = function(e){
+    msg <- paste0("[", context, "] ", conditionMessage(e))
+    message(msg)
+    shiny::validate(shiny::need(FALSE, paste("Prediction failed:", conditionMessage(e))))
+  })
+}
+
+assert_newdata <- function(nd){
+  # 1) Missing predictors
+  missing <- setdiff(predictor_order, names(nd))
+  shiny::validate(shiny::need(length(missing) == 0,
+                              paste0("Missing predictors: ", paste(missing, collapse = ", "))))
+  # 2) Unknown factor levels
+  fact_vars <- predictor_order[vapply(
+    predictor_order,
+    function(v) get_pred_type(v) %in% c("factor","nominal","character","ordered","unordered"),
+    logical(1)
+  )]
+  for (v in fact_vars) {
+    lv <- levels_list[[v]]
+    if (!is.null(lv) && v %in% names(nd)) {
+      vals <- unique(as.character(nd[[v]]))
+      bad  <- setdiff(vals[!is.na(vals)], lv)
+      shiny::validate(shiny::need(length(bad) == 0,
+                                  paste0("Unknown level in '", v, "': ", paste(bad, collapse = ", "))))
+    }
+  }
+  invisible(TRUE)
+}
+
+# Example case defaults (prefilled UI)
 example_case <- list(
-  age = '18 to 60',
-  underline_disease = 'Indeterminate',
-  painel_bin = '0',
+  age = "18 to 60",
+  underline_disease = "Indeterminate",
+  painel_bin = "0",
   time_dialysis_ys = 1,
-  ABO_group = 'O',
-  centro = 'SP_Capital',
-  prior_tx = 'Não',
-  hla_DR_identity = 'not_identity',
-  hla_B_identity = 'not_identity',
-  sorologia_anti_hbs = 'Não',
+  ABO_group = "O",
+  centro = "SP_Capital",
+  prior_tx = "Não",
+  sorologia_anti_hbs = "Não",
   hla_dr1 = 3,
   hla_dr2 = 4,
   hla_b1 = 7,
@@ -247,7 +281,7 @@ ui <- navbarPage(
 # -------------------------
 server <- function(input, output, session){
   
-  # Dynamic inputs built from recipe + overrides
+  # Dynamic inputs
   output$dynamic_inputs <- renderUI({
     tagList(
       lapply(ui_predictors, function(v){
@@ -269,7 +303,7 @@ server <- function(input, output, session){
     )
   })
   
-  # WhatsApp share button (computed from current app URL)
+  # WhatsApp share button
   output$whatsapp_btn <- renderUI({
     url <- build_app_url(session)
     txt <- utils::URLencode(paste0("Confira este app de predição de transplante: ", url), reserved = TRUE)
@@ -277,7 +311,7 @@ server <- function(input, output, session){
     tags$a("Share to WhatsApp", href = href, target = "_blank", class = "btn btn-success")
   })
   
-  # Fill with example defaults (on click — inputs already prefilled above)
+  # Fill with example defaults (inputs já vêm preenchidos; este botão funciona como reset)
   observeEvent(input$fill_example, {
     lapply(ui_predictors, function(v){
       tp  <- get_pred_type(v)
@@ -297,44 +331,47 @@ server <- function(input, output, session){
     })
   })
   
-  # Build input row (manual only)
   input_data <- eventReactive(input$predict_btn, {
     df <- build_manual_row(input)
     df <- coerce_numeric_columns(df)
     
-    # --- Compute identity flags from allele pairs (hidden in UI) ---
-    df <- df %>% dplyr::mutate(
-      hla_DR_identity = dplyr::case_when(
-        !is.na(hla_dr1) & !is.na(hla_dr2) & hla_dr1 == hla_dr2 ~ "identity",
-        TRUE ~ "not_identity"
-      ),
-      hla_B_identity = dplyr::case_when(
-        !is.na(hla_b1) & !is.na(hla_b2) & hla_b1 == hla_b2 ~ "identity",
-        TRUE ~ "not_identity"
+    # Deriva identidades (ocultas na UI) a partir dos pares
+    df <- df %>%
+      dplyr::mutate(
+        hla_DR_identity = dplyr::case_when(
+          !is.na(hla_dr1) & !is.na(hla_dr2) & hla_dr1 == hla_dr2 ~ "identity",
+          TRUE ~ "not_identity"
+        ),
+        hla_B_identity = dplyr::case_when(
+          !is.na(hla_b1) & !is.na(hla_b2) & hla_b1 == hla_b2 ~ "identity",
+          TRUE ~ "not_identity"
+        )
       )
-    )
     
-    # Coerce factors (apply levels after computing identities)
+    # Coerção de fatores após calcular identidades
     df <- coerce_factor_columns(df)
     
-    # Add hidden predictors with defaults and correct type
-    need_hidden <- intersect(hidden_predictors, predictor_order)
-    for (hn in need_hidden) {
-      if (!hn %in% names(df)) {
-        tp  <- get_pred_type(hn)
-        val <- hidden_defaults[[hn]]
-        if (is.null(val)) val <- NA
+    # ---- PREENCHER PREDITORES FALTANTES ANTES DE REORDENAR ----
+    missing <- setdiff(predictor_order, names(df))
+    if (length(missing)) {
+      for (mn in missing) {
+        tp <- get_pred_type(mn)
         if (tp %in% c("numeric","double","integer")) {
-          df[[hn]] <- suppressWarnings(as.numeric(val))
+          df[[mn]] <- NA_real_
         } else {
-          lv <- levels_list[[hn]]
-          if (!is.null(lv)) df[[hn]] <- factor(val, levels = lv) else df[[hn]] <- as.character(val)
+          lv <- levels_list[[mn]]
+          if (is.null(lv)) {
+            df[[mn]] <- NA_character_
+          } else {
+            df[[mn]] <- factor(NA_character_, levels = lv)
+          }
         }
       }
     }
     
-    # Reorder columns to exactly match the recipe predictors
+    # Reordena exatamente conforme o recipe (agora seguro)
     df <- df[, predictor_order, drop = FALSE]
+    
     df
   }, ignoreInit = TRUE)
   
@@ -343,31 +380,39 @@ server <- function(input, output, session){
     req(input_data())
     nd <- input_data()
     
-    # Survival predictions at requested times and grid
-    surv_short <- predict(wf, new_data = nd, type = "survival", eval_time = short_times)
-    surv_grid  <- predict(wf, new_data = nd, type = "survival", eval_time = grid_times)
+    # Validate newdata before predict
+    assert_newdata(nd)
     
-    # Wide risks for short_times -> formatted as percentages without .row
+    # Survival predictions (safe)
+    surv_short <- safe_predict(
+      predict(wf, new_data = nd, type = "survival", eval_time = short_times),
+      context = "surv_short"
+    )
+    surv_grid  <- safe_predict(
+      predict(wf, new_data = nd, type = "survival", eval_time = grid_times),
+      context = "surv_grid"
+    )
+    
+    # Short-time risks in %
     surv_wide <- purrr::map_dfr(
       surv_short$.pred,
       ~{
-        df <- .x
-        df <- df[match(short_times, df$.eval_time), , drop = FALSE]
-        tibble::as_tibble_row(stats::setNames(as.list(df$.pred_survival), paste0("S_", short_times)))
+        dfi <- .x
+        dfi <- dfi[match(short_times, dfi$.eval_time), , drop = FALSE]
+        tibble::as_tibble_row(stats::setNames(as.list(dfi$.pred_survival), paste0("S_", short_times)))
       }
     )
     
-    # Convert to transplant probability = (1 - S(t)) * 100 and label nicely
     risk_wide <- surv_wide
     risk_cols <- paste0("S_", short_times)
     risk_wide[risk_cols] <- lapply(risk_wide[risk_cols], function(x) (1 - x) * 100)
     names(risk_wide) <- paste0("Tx at ", short_times, " mo")
     risk_wide <- dplyr::mutate(risk_wide, dplyr::across(dplyr::everything(), ~ sprintf("%.1f%%", .)))
     
-    # Median time: first time grid where S(t) <= 0.5
-    median_vec <- purrr::map_dbl(surv_grid$.pred, function(df){
-      idx <- which(df$.pred_survival <= 0.5)[1]
-      if (!is.na(idx)) df$.eval_time[idx] else NA_real_
+    # Median time: first grid time where S(t) <= 0.5
+    median_vec <- purrr::map_dbl(surv_grid$.pred, function(dfm){
+      idx <- which(dfm$.pred_survival <= 0.5)[1]
+      if (!is.na(idx)) dfm$.eval_time[idx] else NA_real_
     })
     
     list(risk = risk_wide, median = median_vec, surv_grid = surv_grid)
@@ -385,23 +430,22 @@ server <- function(input, output, session){
                     paste0("Not reached by ", max(grid_times), " mo"),
                     sprintf("%.1f", med[1]))
     tibble::tibble(`Median time (mo)` = label)
-  }, sanitize.text.function = function(x) x)
+  })
   
-  # --- Predicted transplantability curve (first row) ---
+  # Predicted transplantability curve (first valid row)
   output$surv_plot <- renderPlot({
     req(preds())
     sg <- preds()$surv_grid
     
-    # Find first non-empty curve
     good_idx <- which(purrr::map_lgl(sg$.pred, ~ is.data.frame(.x) && nrow(.x) > 0))[1]
     validate(need(length(good_idx) == 1, "No curve available to plot."))
     
-    df <- sg$.pred[[good_idx]]
-    validate(need(all(c(".eval_time",".pred_survival") %in% names(df)),
+    dfc <- sg$.pred[[good_idx]]
+    validate(need(all(c(".eval_time",".pred_survival") %in% names(dfc)),
                   "Prediction object missing required columns."))
     
-    x <- suppressWarnings(as.numeric(df$.eval_time))
-    y <- suppressWarnings(as.numeric(df$.pred_survival))
+    x <- suppressWarnings(as.numeric(dfc$.eval_time))
+    y <- suppressWarnings(as.numeric(dfc$.pred_survival))
     validate(need(length(x) == length(y) && length(x) > 0, "Invalid curve length."))
     validate(need(all(is.finite(x)) && all(is.finite(y)), "Curve contains non-finite values."))
     
@@ -414,4 +458,3 @@ server <- function(input, output, session){
 }
 
 shinyApp(ui, server)
-
