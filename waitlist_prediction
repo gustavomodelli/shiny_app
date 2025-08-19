@@ -187,7 +187,7 @@ ui <- fluidPage(
       h3("Median time-to-event (months)"),
       tableOutput("median_table"),
       tags$br(),
-      h3("Predicted survival curve (first row)"),
+      h3("Predicted transplantability curve (first row)"),
       plotOutput("surv_plot", height = 350)
     )
   )
@@ -327,11 +327,30 @@ server <- function(input, output, session){
                     sprintf("%.1f", med[1]))
     tibble::tibble(`Median time (mo)` = label)
   }, sanitize.text.function = function(x) x)
+  # --- Predicted transplantability curve (robust) ---
+  output$surv_plot <- renderPlot({
+    req(preds())
+    sg <- preds()$surv_grid
+    
+    # Find first non-empty curve
+    good_idx <- which(purrr::map_lgl(sg$.pred, ~ is.data.frame(.x) && nrow(.x) > 0))[1]
+    validate(need(length(good_idx) == 1, "No curve available to plot."))
+    
+    df <- sg$.pred[[good_idx]]
+    validate(need(all(c(".eval_time",".pred_survival") %in% names(df)),
+                  "Prediction object missing required columns."))
+    
+    x <- suppressWarnings(as.numeric(df$.eval_time))
+    y <- suppressWarnings(as.numeric(df$.pred_survival))
+    validate(need(length(x) == length(y) && length(x) > 0, "Invalid curve length."))
+    validate(need(all(is.finite(x)) && all(is.finite(y)), "Curve contains non-finite values."))
+    
+    y_tx <- (1 - y) * 100
+    plot(x, y_tx, type = "l",
+         xlab = "Time (months)", ylab = "Tx probability (1 - S(t)) [%]",
+         main = "Predicted transplantability (first row)", ylim = c(0, 100))
+    abline(h = 50, lty = 2)
+  }, res = 96)
 }
 
 shinyApp(ui, server)
-
-
-
-
-
