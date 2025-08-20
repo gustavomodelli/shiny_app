@@ -1,26 +1,26 @@
-# app.R — ORSF survival Shiny app (clean rebuild)
-# - Loads bundled tidymodels workflow from "orsf_workflow.rds"
-# - Manual inputs only (no CSV upload)
-# - Age categorical select; HLA numeric; painel_bin categorical
-# - Hidden predictor transplante_bin is injected as numeric 0 by default
-# - Identity flags (hla_*_identity) are derived from allele pairs
-# - Outputs transplant probability (1 - S(t)) at 12/24/36/48/60 months (in %)
-# - Median time-to-event shown; if not reached, displays message
-# - "Sobre" tab with author info + mailto button; WhatsApp share button on main tab
+# app.R — Cox (glmnet) survival Shiny app (clean)
+# - Loads bundled tidymodels workflow from "cox_reg_workflow.rds"
+# - Manual inputs only
+# - Age categorical; HLA numeric; painel_bin categorical
+# - Hidden predictor transplante_bin injected as 0 if the recipe expects it
+# - HLA identity flags derived from allele pairs
+# - Outputs: Tx = (1 - S(t)) at 12/24/36/48/60 (in %) + median time (or "Not reached")
+# - "Sobre" tab + WhatsApp share button
 
 options(shiny.fullstacktrace = TRUE)
 
 # Silence reticulate noise on servers without Python
-Sys.setenv(RETICULATE_PYTHON_FALLBACK = "1",
-           RETICULATE_MINICONDA_ENABLED = "FALSE")
+Sys.setenv(
+  RETICULATE_PYTHON_FALLBACK = "1",
+  RETICULATE_MINICONDA_ENABLED = "FALSE"
+)
 
 # -------------------------
 # Packages & checks
 # -------------------------
 needed <- c(
   "shiny","tidymodels","censored","bundle","workflows","recipes",
-  "parsnip","dplyr","purrr","tidyr","readr","tibble",
-  "aorsf","bonsai","embed"
+  "parsnip","dplyr","purrr","tidyr","readr","tibble","glmnet","survival"
 )
 miss <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
 if (length(miss)) stop("Missing packages: ", paste(miss, collapse = ", "),
@@ -38,16 +38,15 @@ library(purrr)
 library(tidyr)
 library(readr)
 library(tibble)
-library(aorsf)
-library(bonsai)
-library(embed)
+library(glmnet)
+library(survival)
 
 # -------------------------
 # Config
 # -------------------------
-model_path  <- "orsf_workflow.rds"   # must be in the same folder as this app.R
-short_times <- c(12, 24, 36, 48, 60) # months
-grid_times  <- 1:120                 # months, for median estimate
+model_path  <- "cox_reg_workflow.rds"     # <— Cox penalizado
+short_times <- c(12, 24, 36, 48, 60)      # months
+grid_times  <- 1:120                      # months for median
 
 if (!file.exists(model_path)) stop("File not found: ", model_path)
 
@@ -60,33 +59,34 @@ if (inherits(rec, "try-error") || is.null(rec)) {
   stop("This app expects a workflow with a trained recipe embedded.")
 }
 
-# Check for supervised encoding steps from {embed}
+# If the recipe used supervised encoding (embed::step_lencode_glm), ensure embed is available
 uses_lencode <- any(vapply(rec$steps, function(s) inherits(s, "step_lencode_glm"), logical(1)))
 if (uses_lencode && !requireNamespace("embed", quietly = TRUE)) {
-  stop("This workflow uses 'step_lencode_glm' from the 'embed' package. Please install.packages('embed') on the server.")
+  stop("This workflow uses 'step_lencode_glm' from {embed}. Please install.packages('embed') on the server.")
 }
 
 pred_info   <- rec$var_info %>% dplyr::filter(role == "predictor")
 levels_list <- rec$levels
+if (is.null(levels_list)) levels_list <- list()  # fallback
 
 # ----- Explicit classes (front-end & coercion) -----
-# Identity flags (fallback if recipe didn't store levels)
+# Identity flags (ensure levels exist)
 if (is.null(levels_list[["hla_DR_identity"]])) levels_list[["hla_DR_identity"]] <- c("identity","not_identity")
 if (is.null(levels_list[["hla_B_identity"]]))  levels_list[["hla_B_identity"]]  <- c("identity","not_identity")
 
-# Age EXACT levels (as provided)
+# Age — exact levels
 levels_list[["age"]] <- c("18 to 60","under 18","more than 60")
 
-# painel_bin categories (explicit)
+# painel_bin
 levels_list[["painel_bin"]] <- c("0","1-79","80-89","90-100")
 
-# ABO order
+# ABO
 levels_list[["ABO_group"]] <- c("A","AB","B","O")
 
-# underline_disease explicit classes
+# underline_disease
 levels_list[["underline_disease"]] <- c("Diabetes","Glomerulonephritis","Hypertension","Indeterminate","Other")
 
-# centro explicit classes (no accents to match common training)
+# centro (sem acentos p/ casar com treino)
 levels_list[["centro"]] <- c(
   "Bahia","Belo Horizonte","Blumenau","Brasilia","Campo Grande","Cuiaba",
   "Fortaleza","Goiania","Joao Pessoa","Juiz de Fora","Maceio","Manaus",
@@ -95,11 +95,11 @@ levels_list[["centro"]] <- c(
   "Uberlandia","Vitoria"
 )
 
-# pt-BR binary factors
-levels_list[["prior_tx"]]           <- c("Não","Sim")
-levels_list[["sorologia_anti_hbs"]] <- c("Não","Sim")
+# pt-BR binários (usar Unicode para robustez em Linux)
+levels_list[["prior_tx"]]           <- c("N\u00E3o","Sim")
+levels_list[["sorologia_anti_hbs"]] <- c("N\u00E3o","Sim")
 
-# Predictor order used by the recipe (we will match this for prediction)
+# Predictor order used by the recipe
 predictor_order <- pred_info$variable
 
 # Hidden predictors (not shown in UI) with defaults
@@ -110,18 +110,12 @@ hidden_defaults   <- list(transplante_bin = 0)
 # -------------------------
 # Types
 # -------------------------
-numeric_force <- c(
-  "time_dialysis_ys",
-  "hla_dr1","hla_dr2","hla_b1","hla_b2","hla_a1","hla_a2"
-)
+numeric_force <- c("time_dialysis_ys","hla_dr1","hla_dr2","hla_b1","hla_b2","hla_a1","hla_a2")
 
 get_pred_type <- function(v){
   if (v %in% numeric_force) return("numeric")
   if (v %in% c("hla_DR_identity","hla_B_identity")) return("nominal")
-  if (v == "age")          return("nominal")
-  if (v == "painel_bin")   return("nominal")
-  if (v == "centro")       return("nominal")
-  if (v %in% c("prior_tx","sorologia_anti_hbs")) return("nominal")
+  if (v %in% c("age","painel_bin","centro","prior_tx","sorologia_anti_hbs")) return("nominal")
   if (v == "transplante_bin") return("numeric")
   # fallback to recipe-declared type
   pred_info$type[pred_info$variable == v][1]
@@ -130,7 +124,6 @@ get_pred_type <- function(v){
 # -------------------------
 # Helpers
 # -------------------------
-# Build one-row tibble from UI inputs
 build_manual_row <- function(input){
   vals <- purrr::map(ui_predictors, function(v){
     tp <- get_pred_type(v)
@@ -148,7 +141,7 @@ coerce_factor_columns <- function(df){
   for (v in names(df)) {
     if (get_pred_type(v) %in% c("factor","nominal","character","ordered","unordered")) {
       lv <- levels_list[[v]]
-      if (!is.null(lv) && v %in% names(df)) df[[v]] <- factor(df[[v]], levels = lv)
+      if (!is.null(lv)) df[[v]] <- factor(df[[v]], levels = lv)
     }
   }
   df
@@ -163,21 +156,19 @@ coerce_numeric_columns <- function(df){
   df
 }
 
-# Robust prediction wrappers and validation
 safe_predict <- function(expr, context = "predict"){
   tryCatch(expr, error = function(e){
-    msg <- paste0("[", context, "] ", conditionMessage(e))
-    message(msg)
-    shiny::validate(shiny::need(FALSE, paste("Prediction failed:", conditionMessage(e))))
+    message("[", context, "] ", conditionMessage(e))
+    validate(need(FALSE, paste("Prediction failed:", conditionMessage(e))))
   })
 }
 
 assert_newdata <- function(nd){
-  # 1) Missing predictors
-  missing <- setdiff(predictor_order, names(nd))
-  shiny::validate(shiny::need(length(missing) == 0,
-                              paste0("Missing predictors: ", paste(missing, collapse = ", "))))
-  # 2) Unknown factor levels
+  # Missing predictors
+  miss <- setdiff(predictor_order, names(nd))
+  validate(need(length(miss) == 0,
+                paste0("Missing predictors: ", paste(miss, collapse = ", "))))
+  # Unknown factor levels
   fact_vars <- predictor_order[vapply(
     predictor_order,
     function(v) get_pred_type(v) %in% c("factor","nominal","character","ordered","unordered"),
@@ -188,14 +179,14 @@ assert_newdata <- function(nd){
     if (!is.null(lv) && v %in% names(nd)) {
       vals <- unique(as.character(nd[[v]]))
       bad  <- setdiff(vals[!is.na(vals)], lv)
-      shiny::validate(shiny::need(length(bad) == 0,
-                                  paste0("Unknown level in '", v, "': ", paste(bad, collapse = ", "))))
+      validate(need(length(bad) == 0,
+                    paste0("Unknown level in '", v, "': ", paste(bad, collapse = ", "))))
     }
   }
   invisible(TRUE)
 }
 
-# Example case defaults (prefilled UI)
+# Example case (prefill)
 example_case <- list(
   age = "18 to 60",
   underline_disease = "Indeterminate",
@@ -203,33 +194,27 @@ example_case <- list(
   time_dialysis_ys = 1,
   ABO_group = "O",
   centro = "SP_Capital",
-  prior_tx = "Não",
-  sorologia_anti_hbs = "Não",
-  hla_dr1 = 3,
-  hla_dr2 = 4,
-  hla_b1 = 7,
-  hla_b2 = 15,
-  hla_a1 = 2,
-  hla_a2 = 24
+  prior_tx = "N\u00E3o",
+  sorologia_anti_hbs = "N\u00E3o",
+  hla_dr1 = 3, hla_dr2 = 4,
+  hla_b1 = 7, hla_b2 = 15,
+  hla_a1 = 2, hla_a2 = 24
 )
 
-# Build current app URL for sharing
 build_app_url <- function(session){
   cd <- session$clientData
   proto <- ifelse(identical(cd$url_protocol, "https:"), "https://", "http://")
-  host  <- cd$url_hostname
-  port  <- cd$url_port
-  path  <- cd$url_pathname
-  query <- cd$url_search
+  host  <- cd$url_hostname; port <- cd$url_port
+  path  <- cd$url_pathname;  query <- cd$url_search
   port_part <- if (nzchar(port) && !port %in% c("80","443")) paste0(":", port) else ""
   paste0(proto, host, port_part, path, query)
 }
 
 # -------------------------
-# UI (navbar with About tab)
+# UI
 # -------------------------
 ui <- navbarPage(
-  title = "ORSF – Transplant Probability (Shiny) – with explicit classes",
+  title = "Transplant Probability - Brazil",
   tabPanel(
     "App",
     fluidPage(
@@ -245,13 +230,13 @@ ui <- navbarPage(
         mainPanel(
           uiOutput("whatsapp_btn"),
           tags$br(),
-          h3("Predicted transplant probability (1 - S(t))"),
+          h3("Predicted transplant probability"),
           tableOutput("risk_table"),
           tags$br(),
           h3("Median time-to-event (months)"),
           tableOutput("median_table"),
           tags$br(),
-          h3("Predicted transplantability curve (first row)"),
+          h3("Predicted transplantability curve"),
           plotOutput("surv_plot", height = 350)
         )
       )
@@ -262,16 +247,10 @@ ui <- navbarPage(
     fluidPage(
       h2("Sobre"),
       tags$p("Desenvolvido por Luis Gustavo Modelli de Andrade."),
-      tags$p(
-        "Email: ",
-        tags$a(href = "mailto:gustavo.modelli@unesp.br", "gustavo.modelli@unesp.br")
-      ),
-      tags$a(
-        "Enviar email",
-        href = "mailto:gustavo.modelli@unesp.br",
-        class = "btn btn-primary",
-        target = "_blank"
-      )
+      tags$p("Email: ",
+             tags$a(href = "mailto:gustavo.modelli@unesp.br", "gustavo.modelli@unesp.br")),
+      tags$a("Enviar email", href = "mailto:gustavo.modelli@unesp.br",
+             class = "btn btn-primary", target = "_blank")
     )
   )
 )
@@ -283,24 +262,22 @@ server <- function(input, output, session){
   
   # Dynamic inputs
   output$dynamic_inputs <- renderUI({
-    tagList(
-      lapply(ui_predictors, function(v){
-        tp <- get_pred_type(v)
-        if (tp %in% c("numeric","double","integer")) {
-          numericInput(v, label = v,
-                       value = if (!is.null(example_case[[v]])) suppressWarnings(as.numeric(example_case[[v]])) else NA_real_)
+    tagList(lapply(ui_predictors, function(v){
+      tp <- get_pred_type(v)
+      if (tp %in% c("numeric","double","integer")) {
+        numericInput(v, label = v,
+                     value = if (!is.null(example_case[[v]])) suppressWarnings(as.numeric(example_case[[v]])) else NA_real_)
+      } else {
+        lv <- levels_list[[v]]
+        if (!is.null(lv)) {
+          sel <- if (!is.null(example_case[[v]]) && example_case[[v]] %in% lv) example_case[[v]] else lv[1]
+          selectInput(v, label = v, choices = lv, selected = sel)
         } else {
-          lv <- levels_list[[v]]
-          if (!is.null(lv)) {
-            sel <- if (!is.null(example_case[[v]]) && example_case[[v]] %in% lv) example_case[[v]] else lv[1]
-            selectInput(v, label = v, choices = lv, selected = sel)
-          } else {
-            textInput(v, label = paste0(v, " (text)"),
-                      value = if (!is.null(example_case[[v]])) as.character(example_case[[v]]) else "")
-          }
+          textInput(v, label = paste0(v, " (text)"),
+                    value = if (!is.null(example_case[[v]])) as.character(example_case[[v]]) else "")
         }
-      })
-    )
+      }
+    }))
   })
   
   # WhatsApp share button
@@ -311,47 +288,63 @@ server <- function(input, output, session){
     tags$a("Share to WhatsApp", href = href, target = "_blank", class = "btn btn-success")
   })
   
-  # Fill with example defaults (inputs já vêm preenchidos; este botão funciona como reset)
+  # Fill example/reset
   observeEvent(input$fill_example, {
     lapply(ui_predictors, function(v){
-      tp  <- get_pred_type(v)
-      val <- example_case[[v]]
+      tp  <- get_pred_type(v); val <- example_case[[v]]
       if (is.null(val)) return(NULL)
       if (tp %in% c("numeric","double","integer")) {
-        shiny::updateNumericInput(session, v, value = suppressWarnings(as.numeric(val)))
+        updateNumericInput(session, v, value = suppressWarnings(as.numeric(val)))
       } else {
         lv <- levels_list[[v]]
         if (!is.null(lv)) {
           sel <- if (!is.null(val) && val %in% lv) val else lv[1]
-          shiny::updateSelectInput(session, v, selected = sel)
+          updateSelectInput(session, v, selected = sel)
         } else {
-          shiny::updateTextInput(session, v, value = as.character(val))
+          updateTextInput(session, v, value = as.character(val))
         }
       }
     })
   })
   
+  # Build new_data robustly
   input_data <- eventReactive(input$predict_btn, {
     df <- build_manual_row(input)
     df <- coerce_numeric_columns(df)
     
-    # Deriva identidades (ocultas na UI) a partir dos pares
+    # Derive HLA identities (hidden)
     df <- df %>%
-      dplyr::mutate(
-        hla_DR_identity = dplyr::case_when(
+      mutate(
+        hla_DR_identity = case_when(
           !is.na(hla_dr1) & !is.na(hla_dr2) & hla_dr1 == hla_dr2 ~ "identity",
           TRUE ~ "not_identity"
         ),
-        hla_B_identity = dplyr::case_when(
+        hla_B_identity = case_when(
           !is.na(hla_b1) & !is.na(hla_b2) & hla_b1 == hla_b2 ~ "identity",
           TRUE ~ "not_identity"
         )
       )
     
-    # Coerção de fatores após calcular identidades
+    # Coerce factors after identities
     df <- coerce_factor_columns(df)
     
-    # ---- PREENCHER PREDITORES FALTANTES ANTES DE REORDENAR ----
+    # Inject hidden predictors only if expected by recipe
+    need_hidden <- intersect(hidden_predictors, predictor_order)
+    for (hn in need_hidden) {
+      if (!hn %in% names(df)) {
+        tp  <- get_pred_type(hn)
+        val <- hidden_defaults[[hn]]
+        if (is.null(val)) val <- NA
+        if (tp %in% c("numeric","double","integer")) {
+          df[[hn]] <- suppressWarnings(as.numeric(val))
+        } else {
+          lv <- levels_list[[hn]]
+          if (!is.null(lv)) df[[hn]] <- factor(val, levels = lv) else df[[hn]] <- as.character(val)
+        }
+      }
+    }
+    
+    # Fill any remaining predictors (type-aware) before reordering
     missing <- setdiff(predictor_order, names(df))
     if (length(missing)) {
       for (mn in missing) {
@@ -360,18 +353,13 @@ server <- function(input, output, session){
           df[[mn]] <- NA_real_
         } else {
           lv <- levels_list[[mn]]
-          if (is.null(lv)) {
-            df[[mn]] <- NA_character_
-          } else {
-            df[[mn]] <- factor(NA_character_, levels = lv)
-          }
+          if (is.null(lv)) df[[mn]] <- factor(NA_character_) else df[[mn]] <- factor(NA_character_, levels = lv)
         }
       }
     }
     
-    # Reordena exatamente conforme o recipe (agora seguro)
+    # Match recipe order
     df <- df[, predictor_order, drop = FALSE]
-    
     df
   }, ignoreInit = TRUE)
   
@@ -383,7 +371,7 @@ server <- function(input, output, session){
     # Validate newdata before predict
     assert_newdata(nd)
     
-    # Survival predictions (safe)
+    # Survival predictions
     surv_short <- safe_predict(
       predict(wf, new_data = nd, type = "survival", eval_time = short_times),
       context = "surv_short"
@@ -393,7 +381,7 @@ server <- function(input, output, session){
       context = "surv_grid"
     )
     
-    # Short-time risks in %
+    # Build risk table (%)
     surv_wide <- purrr::map_dfr(
       surv_short$.pred,
       ~{
@@ -409,7 +397,7 @@ server <- function(input, output, session){
     names(risk_wide) <- paste0("Tx at ", short_times, " mo")
     risk_wide <- dplyr::mutate(risk_wide, dplyr::across(dplyr::everything(), ~ sprintf("%.1f%%", .)))
     
-    # Median time: first grid time where S(t) <= 0.5
+    # Median time: first t where S(t) <= 0.5
     median_vec <- purrr::map_dbl(surv_grid$.pred, function(dfm){
       idx <- which(dfm$.pred_survival <= 0.5)[1]
       if (!is.na(idx)) dfm$.eval_time[idx] else NA_real_
@@ -418,10 +406,7 @@ server <- function(input, output, session){
     list(risk = risk_wide, median = median_vec, surv_grid = surv_grid)
   })
   
-  output$risk_table <- renderTable({
-    req(preds())
-    preds()$risk
-  }, digits = 3)
+  output$risk_table <- renderTable({ req(preds()); preds()$risk }, digits = 3)
   
   output$median_table <- renderTable({
     req(preds())
@@ -429,10 +414,10 @@ server <- function(input, output, session){
     label <- ifelse(is.na(med[1]),
                     paste0("Not reached by ", max(grid_times), " mo"),
                     sprintf("%.1f", med[1]))
-    tibble::tibble(`Median time (mo)` = label)
+    tibble(`Median time (mo)` = label)
   })
   
-  # Predicted transplantability curve (first valid row)
+  # Plot transplantability curve (1 - S) for first row
   output$surv_plot <- renderPlot({
     req(preds())
     sg <- preds()$surv_grid
@@ -458,3 +443,5 @@ server <- function(input, output, session){
 }
 
 shinyApp(ui, server)
+
+
